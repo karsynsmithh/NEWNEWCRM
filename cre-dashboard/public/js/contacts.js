@@ -172,8 +172,57 @@ function contactForm(c = {}) {
   `;
 }
 
+function contactModalBody(c = {}, activeTab = 'details') {
+  const isEdit = !!c.id;
+  const tabsHtml = isEdit ? `
+    <div class="modal-tabs">
+      <button class="modal-tab ${activeTab==='details'?'active':''}" onclick="switchContactTab('details',${c.id})">Details</button>
+      <button class="modal-tab ${activeTab==='activity'?'active':''}" onclick="switchContactTab('activity',${c.id})">Activity History</button>
+    </div>` : '';
+  return tabsHtml + contactForm(c);
+}
+
+window.switchContactTab = async function(tab, contactId) {
+  const body = document.getElementById('modal-body');
+  if (!body) return;
+  const c = await API.get(`/api/contacts/${contactId}`);
+  if (tab === 'details') {
+    body.innerHTML = contactModalBody(c, 'details');
+  } else {
+    body.innerHTML = await buildContactActivityTab(contactId, c);
+  }
+};
+
+async function buildContactActivityTab(contactId, c) {
+  const activities = await API.get(`/api/activities?contact_id=${contactId}`).catch(() => []);
+  const tabsHtml = `
+    <div class="modal-tabs">
+      <button class="modal-tab" onclick="switchContactTab('details',${contactId})">Details</button>
+      <button class="modal-tab active">Activity History</button>
+    </div>`;
+
+  const timelineHtml = activities.length === 0
+    ? '<p style="color:var(--text-muted);font-size:13px;text-align:center;padding:24px 0">No activities logged for this contact.</p>'
+    : `<div class="timeline">${activities.map(a => `
+        <div class="timeline-item">
+          <div class="timeline-dot"></div>
+          <div class="timeline-content">
+            <div class="timeline-meta">${actBadge(a.activity_type)} &nbsp; ${fmtDate(a.activity_date ? a.activity_date.slice(0,10) : '')}</div>
+            <div class="timeline-summary">${a.summary}</div>
+            ${a.notes ? `<div class="timeline-notes">${a.notes}</div>` : ''}
+          </div>
+        </div>`).join('')}
+      </div>`;
+
+  return tabsHtml + `
+    <div style="margin-bottom:12px;display:flex;justify-content:flex-end">
+      <button class="btn btn-secondary btn-sm" onclick="openActivityModalForContact(${contactId})">+ Log Activity</button>
+    </div>
+    ${timelineHtml}`;
+}
+
 function openContactModal(c = {}) {
-  modal.open(c.id ? 'Edit Contact' : 'Add Contact', contactForm(c), async () => {
+  modal.open(c.id ? 'Edit Contact' : 'Add Contact', contactModalBody(c, 'details'), async () => {
     if (!requireField('name', 'Name is required')) return;
     const data = formData(['name','company','email','phone','contact_type','pipeline_stage',
       'req_size_min','req_size_max','req_budget','req_location','req_property_type',

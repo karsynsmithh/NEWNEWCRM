@@ -86,6 +86,109 @@ _db.exec(`
   );
 `);
 
+_db.exec(`
+  CREATE TABLE IF NOT EXISTS activities (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    activity_type TEXT NOT NULL CHECK(activity_type IN (
+      'call','email','meeting','site_tour','loi_sent','loi_countered',
+      'lease_sent','lease_executed','voicemail','text','other'
+    )),
+    summary TEXT NOT NULL,
+    notes TEXT,
+    activity_date DATETIME NOT NULL,
+    duration_minutes INTEGER,
+    contact_id INTEGER REFERENCES contacts(id) ON DELETE SET NULL,
+    deal_id INTEGER REFERENCES deals(id) ON DELETE SET NULL,
+    property_id INTEGER REFERENCES properties(id) ON DELETE SET NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  );
+
+  CREATE TABLE IF NOT EXISTS lease_comps (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    address TEXT NOT NULL,
+    city TEXT,
+    submarket TEXT,
+    property_type TEXT CHECK(property_type IN ('retail','office','industrial','land','mixed-use')),
+    tenant_name TEXT,
+    landlord_name TEXT,
+    size_sf REAL,
+    lease_rate REAL,
+    lease_structure TEXT CHECK(lease_structure IN ('NNN','Modified Gross','Full Gross','Other')),
+    term_months INTEGER,
+    ti_allowance REAL,
+    free_rent_months INTEGER,
+    lease_start_date DATE,
+    lease_end_date DATE,
+    date_signed DATE,
+    source TEXT,
+    notes TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  );
+
+  CREATE TABLE IF NOT EXISTS sale_comps (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    address TEXT NOT NULL,
+    city TEXT,
+    submarket TEXT,
+    property_type TEXT CHECK(property_type IN ('retail','office','industrial','land','mixed-use')),
+    buyer_name TEXT,
+    seller_name TEXT,
+    size_sf REAL,
+    land_acres REAL,
+    sale_price REAL,
+    price_per_sf REAL,
+    noi REAL,
+    cap_rate REAL,
+    year_built INTEGER,
+    occupancy_pct REAL,
+    close_date DATE,
+    source TEXT,
+    notes TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  );
+
+  CREATE TABLE IF NOT EXISTS deal_documents (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    deal_id INTEGER NOT NULL REFERENCES deals(id) ON DELETE CASCADE,
+    doc_name TEXT NOT NULL,
+    status TEXT DEFAULT 'pending' CHECK(status IN ('pending','sent','received','executed','n_a')),
+    due_date DATE,
+    completed_date DATE,
+    notes TEXT,
+    sort_order INTEGER DEFAULT 0,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  );
+
+  CREATE TABLE IF NOT EXISTS vendors (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    company TEXT,
+    vendor_type TEXT NOT NULL CHECK(vendor_type IN (
+      'attorney','title_company','lender','inspector','contractor',
+      'appraiser','architect','environmental','accountant','insurance','other'
+    )),
+    specialty TEXT,
+    email TEXT,
+    phone TEXT,
+    address TEXT,
+    city TEXT,
+    preferred INTEGER DEFAULT 0,
+    rating INTEGER CHECK(rating BETWEEN 1 AND 5),
+    notes TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  );
+
+  CREATE TABLE IF NOT EXISTS deal_vendors (
+    deal_id INTEGER REFERENCES deals(id) ON DELETE CASCADE,
+    vendor_id INTEGER REFERENCES vendors(id) ON DELETE CASCADE,
+    role TEXT,
+    PRIMARY KEY (deal_id, vendor_id)
+  );
+`);
+
 // node:sqlite rejects undefined params — coerce to null
 function sanitize(params) {
   return params.map(p => (p === undefined ? null : p));

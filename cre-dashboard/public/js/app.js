@@ -151,7 +151,7 @@ function requireField(id, msg) {
 
 // ─── Router ────────────────────────────────────────────────────────────────────
 
-const PAGES = ['dashboard', 'properties', 'contacts', 'deals', 'followups'];
+const PAGES = ['dashboard', 'properties', 'contacts', 'deals', 'followups', 'activities', 'comps', 'vendors'];
 const PAGE_LOADERS = {};
 
 function navigate(page) {

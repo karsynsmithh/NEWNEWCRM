@@ -20,6 +20,7 @@ async function loadContacts() {
           <button id="view-kanban" class="${contactsViewMode === 'kanban' ? 'active' : ''}">&#9640; Board</button>
           <button id="view-list" class="${contactsViewMode === 'list' ? 'active' : ''}">&#9776; List</button>
         </div>
+        <a href="/api/contacts/export.csv" class="btn btn-secondary" download>&#8595; Export CSV</a>
         <button class="btn btn-primary" id="add-contact-btn">+ Add Contact</button>
       </div>
     </div>

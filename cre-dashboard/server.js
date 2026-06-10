@@ -1,17 +1,87 @@
+require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const path = require('path');
 const os = require('os');
+const fs = require('fs');
+const multer = require('multer');
 const db = require('./database');
 
 const app = express();
 const PORT = 3000;
 
+// ─── Uploads ──────────────────────────────────────────────────────────────────
+const uploadsDir = path.join(__dirname, 'uploads');
+if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir, { recursive: true });
+
+const multerStorage = multer.diskStorage({
+  destination: (req, file, cb) => cb(null, uploadsDir),
+  filename: (req, file, cb) => {
+    const safe = file.originalname.replace(/[^a-zA-Z0-9._-]/g, '_');
+    cb(null, `${Date.now()}-${safe}`);
+  }
+});
+const upload = multer({ storage: multerStorage, limits: { fileSize: 25 * 1024 * 1024 } });
+
+// ─── Gmail OAuth Client ───────────────────────────────────────────────────────
+let oauth2Client = null;
+let gmailEnabled = false;
+
+if (process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET) {
+  try {
+    const { google } = require('googleapis');
+    oauth2Client = new google.auth.OAuth2(
+      process.env.GOOGLE_CLIENT_ID,
+      process.env.GOOGLE_CLIENT_SECRET,
+      process.env.GOOGLE_REDIRECT_URI || 'http://localhost:3000/auth/gmail/callback'
+    );
+    oauth2Client.on('tokens', tokens => {
+      if (tokens.access_token) {
+        db.prepare(`UPDATE gmail_tokens SET access_token=?, expiry_date=?, updated_at=CURRENT_TIMESTAMP
+          WHERE id=(SELECT id FROM gmail_tokens LIMIT 1)`)
+          .run(tokens.access_token, tokens.expiry_date);
+      }
+    });
+    gmailEnabled = true;
+  } catch (e) {
+    console.warn('  Gmail integration: googleapis not available —', e.message);
+  }
+}
+
 app.use(cors());
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
+app.use('/uploads', express.static(uploadsDir));
+
+// ─── CSV Helper ───────────────────────────────────────────────────────────────
+
+function toCSV(rows, columns) {
+  const esc = v => {
+    if (v == null) return '';
+    const s = String(v);
+    return (s.includes(',') || s.includes('"') || s.includes('\n'))
+      ? '"' + s.replace(/"/g, '""') + '"' : s;
+  };
+  return [columns.map(c => esc(c.label)), ...rows.map(r => columns.map(c => esc(r[c.key])))].map(row => row.join(',')).join('\n');
+}
 
 // ─── Properties ───────────────────────────────────────────────────────────────
+
+app.get('/api/properties/export.csv', (req, res) => {
+  const rows = db.prepare('SELECT * FROM properties ORDER BY created_at DESC').all();
+  res.setHeader('Content-Type', 'text/csv');
+  res.setHeader('Content-Disposition', 'attachment; filename="properties.csv"');
+  res.send(toCSV(rows, [
+    { key: 'id', label: 'ID' }, { key: 'address', label: 'Address' },
+    { key: 'city', label: 'City' }, { key: 'state', label: 'State' },
+    { key: 'property_type', label: 'Type' }, { key: 'size_sf', label: 'Size SF' },
+    { key: 'asking_rate', label: 'Rate $/SF/yr' }, { key: 'asking_price', label: 'Asking Price' },
+    { key: 'rep_type', label: 'Rep Type' }, { key: 'status', label: 'Status' },
+    { key: 'owner_name', label: 'Owner' }, { key: 'owner_phone', label: 'Owner Phone' },
+    { key: 'owner_email', label: 'Owner Email' }, { key: 'year_built', label: 'Year Built' },
+    { key: 'notes', label: 'Notes' }, { key: 'created_at', label: 'Created' }
+  ]));
+});
 
 app.get('/api/properties', (req, res) => {
   const { status } = req.query;
@@ -118,6 +188,23 @@ app.delete('/api/properties/:id/suites/:sid', (req, res) => {
 
 // ─── Contacts ─────────────────────────────────────────────────────────────────
 
+app.get('/api/contacts/export.csv', (req, res) => {
+  const rows = db.prepare('SELECT * FROM contacts ORDER BY created_at DESC').all();
+  res.setHeader('Content-Type', 'text/csv');
+  res.setHeader('Content-Disposition', 'attachment; filename="contacts.csv"');
+  res.send(toCSV(rows, [
+    { key: 'id', label: 'ID' }, { key: 'name', label: 'Name' },
+    { key: 'company', label: 'Company' }, { key: 'email', label: 'Email' },
+    { key: 'phone', label: 'Phone' }, { key: 'contact_type', label: 'Type' },
+    { key: 'pipeline_stage', label: 'Stage' },
+    { key: 'req_size_min', label: 'Req SF Min' }, { key: 'req_size_max', label: 'Req SF Max' },
+    { key: 'req_budget', label: 'Budget' }, { key: 'req_location', label: 'Location' },
+    { key: 'req_property_type', label: 'Prop Type Pref' },
+    { key: 'next_followup_date', label: 'Next Follow-up' },
+    { key: 'notes', label: 'Notes' }, { key: 'created_at', label: 'Created' }
+  ]));
+});
+
 app.get('/api/contacts', (req, res) => {
   const { stage, type } = req.query;
   const conditions = [];
@@ -209,6 +296,32 @@ app.delete('/api/contacts/:id', (req, res) => {
 });
 
 // ─── Deals ────────────────────────────────────────────────────────────────────
+
+app.get('/api/deals/export.csv', (req, res) => {
+  const rows = db.prepare(`
+    SELECT d.*, p.address as property_address, c1.name as tenant_buyer_name, c2.name as landlord_seller_name
+    FROM deals d
+    LEFT JOIN properties p ON d.property_id = p.id
+    LEFT JOIN contacts c1 ON d.tenant_buyer_id = c1.id
+    LEFT JOIN contacts c2 ON d.landlord_seller_id = c2.id
+    ORDER BY d.created_at DESC
+  `).all();
+  res.setHeader('Content-Type', 'text/csv');
+  res.setHeader('Content-Disposition', 'attachment; filename="deals.csv"');
+  res.send(toCSV(rows, [
+    { key: 'id', label: 'ID' }, { key: 'deal_name', label: 'Deal Name' },
+    { key: 'deal_type', label: 'Type' }, { key: 'property_address', label: 'Property' },
+    { key: 'tenant_buyer_name', label: 'Tenant/Buyer' }, { key: 'landlord_seller_name', label: 'Landlord/Seller' },
+    { key: 'status', label: 'Status' }, { key: 'lease_rate', label: 'Lease Rate' },
+    { key: 'size_sf', label: 'Size SF' }, { key: 'term_months', label: 'Term (mo)' },
+    { key: 'ti_allowance', label: 'TI $/SF' }, { key: 'free_rent_months', label: 'Free Rent (mo)' },
+    { key: 'sale_price', label: 'Sale Price' }, { key: 'noi', label: 'NOI' },
+    { key: 'cap_rate', label: 'Cap Rate' }, { key: 'loi_date', label: 'LOI Date' },
+    { key: 'expected_close_date', label: 'Exp Close' }, { key: 'actual_close_date', label: 'Actual Close' },
+    { key: 'total_commission', label: 'Commission' }, { key: 'commission_status', label: 'Comm Status' },
+    { key: 'notes', label: 'Notes' }, { key: 'created_at', label: 'Created' }
+  ]));
+});
 
 app.get('/api/deals', (req, res) => {
   const { status, deal_type } = req.query;
@@ -368,6 +481,148 @@ app.put('/api/followups/:id', (req, res) => {
 app.delete('/api/followups/:id', (req, res) => {
   const result = db.prepare('DELETE FROM followups WHERE id = ?').run(req.params.id);
   if (result.changes === 0) return res.status(404).json({ error: 'Not found' });
+  res.json({ success: true });
+});
+
+// ─── Attachments ─────────────────────────────────────────────────────────────
+
+app.get('/api/attachments', (req, res) => {
+  const { property_id, deal_id } = req.query;
+  let field, value;
+  if (property_id) { field = 'property_id'; value = property_id; }
+  else if (deal_id) { field = 'deal_id'; value = deal_id; }
+  else return res.status(400).json({ error: 'property_id or deal_id is required' });
+  res.json(db.prepare(`SELECT * FROM attachments WHERE ${field} = ? ORDER BY created_at DESC`).all(value));
+});
+
+app.post('/api/attachments', upload.single('file'), (req, res) => {
+  if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
+  const { property_id, deal_id } = req.body;
+  if (!property_id && !deal_id) {
+    fs.unlinkSync(req.file.path);
+    return res.status(400).json({ error: 'property_id or deal_id is required' });
+  }
+  const result = db.prepare(`
+    INSERT INTO attachments (property_id, deal_id, original_name, stored_name, mime_type, size_bytes)
+    VALUES (?, ?, ?, ?, ?, ?)
+  `).run(property_id || null, deal_id || null, req.file.originalname, req.file.filename, req.file.mimetype, req.file.size);
+  res.status(201).json(db.prepare('SELECT * FROM attachments WHERE id = ?').get(result.lastInsertRowid));
+});
+
+app.delete('/api/attachments/:id', (req, res) => {
+  const a = db.prepare('SELECT * FROM attachments WHERE id = ?').get(req.params.id);
+  if (!a) return res.status(404).json({ error: 'Not found' });
+  try { fs.unlinkSync(path.join(uploadsDir, a.stored_name)); } catch (e) { /* already gone */ }
+  db.prepare('DELETE FROM attachments WHERE id = ?').run(req.params.id);
+  res.json({ success: true });
+});
+
+// ─── Activity Feed ────────────────────────────────────────────────────────────
+
+app.get('/api/activity', (req, res) => {
+  const rows = db.prepare(`
+    SELECT n.id AS note_id, n.note_text, n.note_date, p.address AS entity_name, 'property' AS entity_type, p.id AS entity_id
+    FROM notes n JOIN properties p ON n.property_id = p.id
+    UNION ALL
+    SELECT n.id AS note_id, n.note_text, n.note_date, c.name AS entity_name, 'contact' AS entity_type, c.id AS entity_id
+    FROM notes n JOIN contacts c ON n.contact_id = c.id
+    UNION ALL
+    SELECT n.id AS note_id, n.note_text, n.note_date, d.deal_name AS entity_name, 'deal' AS entity_type, d.id AS entity_id
+    FROM notes n JOIN deals d ON n.deal_id = d.id
+    ORDER BY note_date DESC, note_id DESC
+    LIMIT 30
+  `).all();
+  res.json(rows);
+});
+
+// ─── Gmail Integration ────────────────────────────────────────────────────────
+
+app.get('/api/gmail/status', (req, res) => {
+  const config = db.prepare('SELECT gmail_email, last_sync FROM gmail_tokens LIMIT 1').get();
+  res.json({ enabled: gmailEnabled, connected: !!config, email: config?.gmail_email || null, last_sync: config?.last_sync || null });
+});
+
+app.get('/auth/gmail', (req, res) => {
+  if (!gmailEnabled) return res.status(503).send('Gmail not configured — add GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET to .env');
+  const url = oauth2Client.generateAuthUrl({
+    access_type: 'offline',
+    scope: ['https://www.googleapis.com/auth/gmail.readonly'],
+    prompt: 'consent'
+  });
+  res.redirect(url);
+});
+
+app.get('/auth/gmail/callback', async (req, res) => {
+  if (!gmailEnabled) return res.redirect('/?gmail=error');
+  try {
+    const { google } = require('googleapis');
+    const { tokens } = await oauth2Client.getToken(req.query.code);
+    oauth2Client.setCredentials(tokens);
+    const gmail = google.gmail({ version: 'v1', auth: oauth2Client });
+    const profile = await gmail.users.getProfile({ userId: 'me' });
+    const existing = db.prepare('SELECT id FROM gmail_tokens LIMIT 1').get();
+    if (existing) {
+      db.prepare(`UPDATE gmail_tokens SET access_token=?, refresh_token=?, expiry_date=?, gmail_email=?, updated_at=CURRENT_TIMESTAMP WHERE id=?`)
+        .run(tokens.access_token, tokens.refresh_token || null, tokens.expiry_date || null, profile.data.emailAddress, existing.id);
+    } else {
+      db.prepare(`INSERT INTO gmail_tokens (access_token, refresh_token, expiry_date, gmail_email) VALUES (?,?,?,?)`)
+        .run(tokens.access_token, tokens.refresh_token || null, tokens.expiry_date || null, profile.data.emailAddress);
+    }
+    res.redirect('/?gmail=connected');
+  } catch (e) {
+    console.error('Gmail OAuth error:', e.message);
+    res.redirect('/?gmail=error');
+  }
+});
+
+app.post('/api/gmail/sync', async (req, res) => {
+  if (!gmailEnabled) return res.status(503).json({ error: 'Gmail not configured' });
+  const config = db.prepare('SELECT * FROM gmail_tokens LIMIT 1').get();
+  if (!config) return res.status(400).json({ error: 'Gmail not connected. Connect first via /auth/gmail' });
+
+  const { google } = require('googleapis');
+  oauth2Client.setCredentials({ access_token: config.access_token, refresh_token: config.refresh_token, expiry_date: config.expiry_date });
+  const gmail = google.gmail({ version: 'v1', auth: oauth2Client });
+
+  const contacts = db.prepare(`SELECT id, name, email FROM contacts WHERE email IS NOT NULL AND trim(email) != ''`).all();
+  let imported = 0;
+
+  for (const contact of contacts) {
+    try {
+      const listResp = await gmail.users.messages.list({
+        userId: 'me',
+        q: `from:${contact.email} OR to:${contact.email}`,
+        maxResults: 20
+      });
+      for (const msg of (listResp.data.messages || [])) {
+        if (db.prepare('SELECT id FROM email_imports WHERE gmail_message_id = ?').get(msg.id)) continue;
+        const detail = await gmail.users.messages.get({
+          userId: 'me', id: msg.id, format: 'metadata',
+          metadataHeaders: ['Subject', 'From', 'To', 'Date']
+        });
+        const hdrs = detail.data.payload?.headers || [];
+        const subject = hdrs.find(h => h.name === 'Subject')?.value || '(no subject)';
+        const from = hdrs.find(h => h.name === 'From')?.value || '';
+        const dateStr = hdrs.find(h => h.name === 'Date')?.value;
+        const noteDate = dateStr ? new Date(dateStr).toISOString().replace('T', ' ').slice(0, 19) : null;
+        const noteText = `✉️ ${subject}\nFrom: ${from}`;
+        const noteResult = db.prepare(
+          `INSERT INTO notes (note_text, note_date, contact_id) VALUES (?, COALESCE(?, CURRENT_TIMESTAMP), ?)`
+        ).run(noteText, noteDate, contact.id);
+        db.prepare('INSERT INTO email_imports (gmail_message_id, note_id) VALUES (?, ?)').run(msg.id, noteResult.lastInsertRowid);
+        imported++;
+      }
+    } catch (e) {
+      console.error(`Gmail sync contact ${contact.id}:`, e.message);
+    }
+  }
+
+  db.prepare('UPDATE gmail_tokens SET last_sync=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP WHERE id=?').run(config.id);
+  res.json({ imported, message: `Imported ${imported} new email${imported === 1 ? '' : 's'}` });
+});
+
+app.delete('/auth/gmail', (req, res) => {
+  db.prepare('DELETE FROM gmail_tokens').run();
   res.json({ success: true });
 });
 

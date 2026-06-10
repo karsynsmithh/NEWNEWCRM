@@ -240,5 +240,13 @@ document.querySelectorAll('.nav-link').forEach(a => {
 
 // Init
 window.addEventListener('DOMContentLoaded', () => {
+  const params = new URLSearchParams(location.search);
+  if (params.get('gmail') === 'connected') {
+    history.replaceState(null, '', location.pathname + location.hash);
+    setTimeout(() => toast('Gmail connected — click Sync Now to import emails'), 400);
+  } else if (params.get('gmail') === 'error') {
+    history.replaceState(null, '', location.pathname + location.hash);
+    setTimeout(() => toast('Gmail connection failed', 'error'), 400);
+  }
   navigate(location.hash.replace('#', '') || 'dashboard');
 });

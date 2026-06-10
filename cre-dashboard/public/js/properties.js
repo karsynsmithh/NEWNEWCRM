@@ -17,7 +17,10 @@ async function loadProperties() {
   el.innerHTML = `
     <div class="page-header">
       <h1 class="page-title">Properties</h1>
-      <button class="btn btn-primary" id="add-property-btn">+ Add Property</button>
+      <div style="display:flex;gap:8px;align-items:center">
+        <a href="/api/properties/export.csv" class="btn btn-secondary" download>&#8595; Export CSV</a>
+        <button class="btn btn-primary" id="add-property-btn">+ Add Property</button>
+      </div>
     </div>
     <div class="filter-bar">
       <select id="filter-type">
@@ -182,10 +185,12 @@ function openPropertyModal(p = {}) {
     <div class="modal-tabs">
       <button type="button" class="modal-tab active" data-tab="details">Details</button>
       <button type="button" class="modal-tab" data-tab="suites">Suites / Spaces</button>
+      <button type="button" class="modal-tab" data-tab="attachments">Attachments</button>
       <button type="button" class="modal-tab" data-tab="notes">Notes</button>
     </div>
     <div class="modal-tab-pane" id="tab-details">${propertyForm(p)}</div>
     <div class="modal-tab-pane" id="tab-suites" style="display:none">${suitesTabHtml()}</div>
+    <div class="modal-tab-pane" id="tab-attachments" style="display:none">${attachmentsTabHtml()}</div>
     <div class="modal-tab-pane" id="tab-notes" style="display:none">${notesTabHtml()}</div>
   ` : propertyForm(p);
 
@@ -210,6 +215,7 @@ function openPropertyModal(p = {}) {
   if (p.id) {
     initModalTabs();
     loadSuitesTab(p.id);
+    loadAttachmentsTab('property_id', p.id);
     loadNotesTab('property_id', p.id);
   }
 }

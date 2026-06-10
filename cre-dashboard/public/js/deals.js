@@ -25,7 +25,10 @@ async function loadDeals() {
   el.innerHTML = `
     <div class="page-header">
       <h1 class="page-title">Deals</h1>
-      <button class="btn btn-primary" id="add-deal-btn">+ Add Deal</button>
+      <div style="display:flex;gap:8px;align-items:center">
+        <a href="/api/deals/export.csv" class="btn btn-secondary" download>&#8595; Export CSV</a>
+        <button class="btn btn-primary" id="add-deal-btn">+ Add Deal</button>
+      </div>
     </div>
     <div class="filter-bar">
       <select id="filter-deal-status">
@@ -237,9 +240,11 @@ function openDealModal(d = {}) {
   const html = d.id ? `
     <div class="modal-tabs">
       <button type="button" class="modal-tab active" data-tab="details">Details</button>
+      <button type="button" class="modal-tab" data-tab="attachments">Attachments</button>
       <button type="button" class="modal-tab" data-tab="notes">Notes</button>
     </div>
     <div class="modal-tab-pane" id="tab-details">${dealForm(d)}</div>
+    <div class="modal-tab-pane" id="tab-attachments" style="display:none">${attachmentsTabHtml()}</div>
     <div class="modal-tab-pane" id="tab-notes" style="display:none">${notesTabHtml()}</div>
   ` : dealForm(d);
 
@@ -269,6 +274,7 @@ function openDealModal(d = {}) {
 
   if (d.id) {
     initModalTabs();
+    loadAttachmentsTab('deal_id', d.id);
     loadNotesTab('deal_id', d.id);
   }
 }

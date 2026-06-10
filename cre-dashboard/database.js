@@ -110,6 +110,35 @@ _db.exec(`
     deal_id INTEGER REFERENCES deals(id) ON DELETE CASCADE,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
   );
+
+  CREATE TABLE IF NOT EXISTS attachments (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    property_id INTEGER REFERENCES properties(id) ON DELETE CASCADE,
+    deal_id INTEGER REFERENCES deals(id) ON DELETE CASCADE,
+    original_name TEXT NOT NULL,
+    stored_name TEXT NOT NULL,
+    mime_type TEXT,
+    size_bytes INTEGER,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  );
+
+  CREATE TABLE IF NOT EXISTS gmail_tokens (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    access_token TEXT,
+    refresh_token TEXT,
+    expiry_date INTEGER,
+    gmail_email TEXT,
+    last_sync DATETIME,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  );
+
+  CREATE TABLE IF NOT EXISTS email_imports (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    gmail_message_id TEXT UNIQUE NOT NULL,
+    note_id INTEGER REFERENCES notes(id) ON DELETE SET NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  );
 `);
 
 // node:sqlite rejects undefined params — coerce to null

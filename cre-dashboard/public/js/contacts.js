@@ -173,14 +173,65 @@ function contactForm(c = {}) {
   `;
 }
 
+function contactModalBody(c = {}, activeTab = 'details') {
+  const isEdit = !!c.id;
+  const tabsHtml = isEdit ? `
+    <div class="modal-tabs">
+      <button class="modal-tab ${activeTab==='details'?'active':''}" onclick="switchContactTab('details',${c.id})">Details</button>
+      <button class="modal-tab ${activeTab==='activity'?'active':''}" onclick="switchContactTab('activity',${c.id})">Activity History</button>
+    </div>` : '';
+  return tabsHtml + contactForm(c);
+}
+
+window.switchContactTab = async function(tab, contactId) {
+  const body = document.getElementById('modal-body');
+  if (!body) return;
+  const c = await API.get(`/api/contacts/${contactId}`);
+  if (tab === 'details') {
+    body.innerHTML = contactModalBody(c, 'details');
+  } else {
+    body.innerHTML = await buildContactActivityTab(contactId, c);
+  }
+};
+
+async function buildContactActivityTab(contactId, c) {
+  const activities = await API.get(`/api/activities?contact_id=${contactId}`).catch(() => []);
+  const tabsHtml = `
+    <div class="modal-tabs">
+      <button class="modal-tab" onclick="switchContactTab('details',${contactId})">Details</button>
+      <button class="modal-tab active">Activity History</button>
+    </div>`;
+
+  const timelineHtml = activities.length === 0
+    ? '<p style="color:var(--text-muted);font-size:13px;text-align:center;padding:24px 0">No activities logged for this contact.</p>'
+    : `<div class="timeline">${activities.map(a => `
+        <div class="timeline-item">
+          <div class="timeline-dot"></div>
+          <div class="timeline-content">
+            <div class="timeline-meta">${actBadge(a.activity_type)} &nbsp; ${fmtDate(a.activity_date ? a.activity_date.slice(0,10) : '')}</div>
+            <div class="timeline-summary">${a.summary}</div>
+            ${a.notes ? `<div class="timeline-notes">${a.notes}</div>` : ''}
+          </div>
+        </div>`).join('')}
+      </div>`;
+
+  return tabsHtml + `
+    <div style="margin-bottom:12px;display:flex;justify-content:flex-end">
+      <button class="btn btn-secondary btn-sm" onclick="openActivityModalForContact(${contactId})">+ Log Activity</button>
+    </div>
+    ${timelineHtml}`;
+}
+
 function openContactModal(c = {}) {
   const html = c.id ? `
     <div class="modal-tabs">
       <button type="button" class="modal-tab active" data-tab="details">Details</button>
       <button type="button" class="modal-tab" data-tab="notes">Notes</button>
+      <button type="button" class="modal-tab" data-tab="activity">Activity History</button>
     </div>
     <div class="modal-tab-pane" id="tab-details">${contactForm(c)}</div>
     <div class="modal-tab-pane" id="tab-notes" style="display:none">${notesTabHtml()}</div>
+    <div class="modal-tab-pane" id="tab-activity" style="display:none"><p style="color:var(--text-muted);font-size:13px;padding:12px 0">Loading…</p></div>
   ` : contactForm(c);
 
   modal.open(c.id ? 'Edit Contact' : 'Add Contact', html, async () => {
@@ -206,7 +257,31 @@ function openContactModal(c = {}) {
   if (c.id) {
     initModalTabs();
     loadNotesTab('contact_id', c.id);
+    _loadContactActivityPane(c.id);
   }
+}
+
+async function _loadContactActivityPane(contactId) {
+  const pane = document.getElementById('tab-activity');
+  if (!pane) return;
+  const activities = await API.get(`/api/activities?contact_id=${contactId}`).catch(() => []);
+  const timelineHtml = activities.length === 0
+    ? '<p style="color:var(--text-muted);font-size:13px;text-align:center;padding:24px 0">No activities logged for this contact.</p>'
+    : `<div class="timeline">${activities.map(a => `
+        <div class="timeline-item">
+          <div class="timeline-dot"></div>
+          <div class="timeline-content">
+            <div class="timeline-meta">${actBadge(a.activity_type)} &nbsp; ${fmtDate(a.activity_date ? a.activity_date.slice(0,10) : '')}</div>
+            <div class="timeline-summary">${a.summary}</div>
+            ${a.notes ? `<div class="timeline-notes">${a.notes}</div>` : ''}
+          </div>
+        </div>`).join('')}
+      </div>`;
+  pane.innerHTML = `
+    <div style="margin-bottom:12px;display:flex;justify-content:flex-end">
+      <button class="btn btn-secondary btn-sm" onclick="openActivityModalForContact(${contactId})">+ Log Activity</button>
+    </div>
+    ${timelineHtml}`;
 }
 
 async function editContact(id) {

@@ -385,7 +385,42 @@ app.post('/api/deals', (req, res) => {
     loi_date, expected_close_date, actual_close_date,
     total_commission, commission_status || 'pending', notes);
 
-  res.status(201).json(db.prepare('SELECT * FROM deals WHERE id = ?').get(result.lastInsertRowid));
+  const dealId = result.lastInsertRowid;
+
+  const leaseDocs = [
+    'NDA / Confidentiality Agreement',
+    'Letter of Intent (LOI) — Draft',
+    'Letter of Intent (LOI) — Executed',
+    'Lease Draft — Landlord Version',
+    'Lease Draft — Tenant Redlines',
+    'Lease — Final Executed',
+    'Certificate of Insurance',
+    'Personal Guarantee (if applicable)',
+    'Commission Agreement',
+    'Commission Invoice Sent',
+    'Commission — Received'
+  ];
+  const saleDocs = [
+    'NDA / Confidentiality Agreement',
+    'Letter of Intent (LOI) — Draft',
+    'Letter of Intent (LOI) — Executed',
+    'Purchase & Sale Agreement — Draft',
+    'Purchase & Sale Agreement — Executed',
+    'Due Diligence Checklist Sent',
+    'Inspection Reports Received',
+    'Title Commitment Received',
+    'Loan Commitment (if applicable)',
+    'Closing Statement',
+    'Commission Agreement',
+    'Commission Invoice Sent',
+    'Commission — Received'
+  ];
+
+  const docList = deal_type === 'sale' ? saleDocs : leaseDocs;
+  const insertDoc = db.prepare('INSERT INTO deal_documents (deal_id, doc_name, sort_order) VALUES (?, ?, ?)');
+  docList.forEach((name, i) => insertDoc.run(dealId, name, i));
+
+  res.status(201).json(db.prepare('SELECT * FROM deals WHERE id = ?').get(dealId));
 });
 
 app.put('/api/deals/:id', (req, res) => {
@@ -756,6 +791,338 @@ app.get('/api/dashboard/summary', (req, res) => {
     pipeline_by_stage,
     upcoming_events
   });
+});
+
+// ─── Activities ──────────────────────────────────────────────────────────────
+
+app.get('/api/activities/recent', (req, res) => {
+  const rows = db.prepare(`
+    SELECT a.*, c.name as contact_name, d.deal_name, p.address as property_address
+    FROM activities a
+    LEFT JOIN contacts c ON a.contact_id = c.id
+    LEFT JOIN deals d ON a.deal_id = d.id
+    LEFT JOIN properties p ON a.property_id = p.id
+    ORDER BY a.activity_date DESC LIMIT 20
+  `).all();
+  res.json(rows);
+});
+
+app.get('/api/activities', (req, res) => {
+  const { contact_id, deal_id, property_id } = req.query;
+  const conditions = [];
+  const params = [];
+  if (contact_id) { conditions.push('a.contact_id = ?'); params.push(contact_id); }
+  if (deal_id) { conditions.push('a.deal_id = ?'); params.push(deal_id); }
+  if (property_id) { conditions.push('a.property_id = ?'); params.push(property_id); }
+  let sql = `
+    SELECT a.*, c.name as contact_name, d.deal_name, p.address as property_address
+    FROM activities a
+    LEFT JOIN contacts c ON a.contact_id = c.id
+    LEFT JOIN deals d ON a.deal_id = d.id
+    LEFT JOIN properties p ON a.property_id = p.id
+  `;
+  if (conditions.length) sql += ' WHERE ' + conditions.join(' AND ');
+  sql += ' ORDER BY a.activity_date DESC';
+  res.json(db.prepare(sql).all(...params));
+});
+
+app.get('/api/activities/:id', (req, res) => {
+  const row = db.prepare(`
+    SELECT a.*, c.name as contact_name, d.deal_name, p.address as property_address
+    FROM activities a
+    LEFT JOIN contacts c ON a.contact_id = c.id
+    LEFT JOIN deals d ON a.deal_id = d.id
+    LEFT JOIN properties p ON a.property_id = p.id
+    WHERE a.id = ?
+  `).get(req.params.id);
+  if (!row) return res.status(404).json({ error: 'Not found' });
+  res.json(row);
+});
+
+app.post('/api/activities', (req, res) => {
+  const { activity_type, summary, notes, activity_date, duration_minutes, contact_id, deal_id, property_id } = req.body;
+  if (!activity_type) return res.status(400).json({ error: 'Activity type is required' });
+  if (!summary) return res.status(400).json({ error: 'Summary is required' });
+  if (!activity_date) return res.status(400).json({ error: 'Activity date is required' });
+  const result = db.prepare(`
+    INSERT INTO activities (activity_type, summary, notes, activity_date, duration_minutes, contact_id, deal_id, property_id)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(activity_type, summary, notes, activity_date, duration_minutes, contact_id || null, deal_id || null, property_id || null);
+  res.status(201).json(db.prepare('SELECT * FROM activities WHERE id = ?').get(result.lastInsertRowid));
+});
+
+app.put('/api/activities/:id', (req, res) => {
+  const { activity_type, summary, notes, activity_date, duration_minutes, contact_id, deal_id, property_id } = req.body;
+  const result = db.prepare(`
+    UPDATE activities SET activity_type=?, summary=?, notes=?, activity_date=?, duration_minutes=?,
+      contact_id=?, deal_id=?, property_id=?
+    WHERE id=?
+  `).run(activity_type, summary, notes, activity_date, duration_minutes,
+    contact_id || null, deal_id || null, property_id || null, req.params.id);
+  if (result.changes === 0) return res.status(404).json({ error: 'Not found' });
+  res.json(db.prepare('SELECT * FROM activities WHERE id = ?').get(req.params.id));
+});
+
+app.delete('/api/activities/:id', (req, res) => {
+  const result = db.prepare('DELETE FROM activities WHERE id = ?').run(req.params.id);
+  if (result.changes === 0) return res.status(404).json({ error: 'Not found' });
+  res.json({ success: true });
+});
+
+// ─── Comps ────────────────────────────────────────────────────────────────────
+
+app.get('/api/comps/summary', (req, res) => {
+  const avg_lease_rate_by_type = db.prepare(`
+    SELECT property_type, AVG(lease_rate) as avg_rate, COUNT(*) as count
+    FROM lease_comps WHERE lease_rate IS NOT NULL GROUP BY property_type
+  `).all();
+  const avg_sale_price_psf_by_type = db.prepare(`
+    SELECT property_type, AVG(price_per_sf) as avg_price_psf, AVG(cap_rate) as avg_cap_rate, COUNT(*) as count
+    FROM sale_comps WHERE price_per_sf IS NOT NULL GROUP BY property_type
+  `).all();
+  const recent_leases = db.prepare(`SELECT * FROM lease_comps ORDER BY date_signed DESC LIMIT 5`).all();
+  const recent_sales = db.prepare(`SELECT * FROM sale_comps ORDER BY close_date DESC LIMIT 5`).all();
+  res.json({ avg_lease_rate_by_type, avg_sale_price_psf_by_type, recent_leases, recent_sales });
+});
+
+app.get('/api/comps/leases', (req, res) => {
+  const { property_type, submarket } = req.query;
+  const conditions = [];
+  const params = [];
+  if (property_type) { conditions.push('property_type = ?'); params.push(property_type); }
+  if (submarket) { conditions.push('submarket LIKE ?'); params.push(`%${submarket}%`); }
+  let sql = 'SELECT * FROM lease_comps';
+  if (conditions.length) sql += ' WHERE ' + conditions.join(' AND ');
+  sql += ' ORDER BY date_signed DESC, created_at DESC';
+  res.json(db.prepare(sql).all(...params));
+});
+
+app.get('/api/comps/leases/:id', (req, res) => {
+  const row = db.prepare('SELECT * FROM lease_comps WHERE id = ?').get(req.params.id);
+  if (!row) return res.status(404).json({ error: 'Not found' });
+  res.json(row);
+});
+
+app.post('/api/comps/leases', (req, res) => {
+  const { address, city, submarket, property_type, tenant_name, landlord_name, size_sf,
+    lease_rate, lease_structure, term_months, ti_allowance, free_rent_months,
+    lease_start_date, lease_end_date, date_signed, source, notes } = req.body;
+  if (!address) return res.status(400).json({ error: 'Address is required' });
+  const result = db.prepare(`
+    INSERT INTO lease_comps (address, city, submarket, property_type, tenant_name, landlord_name,
+      size_sf, lease_rate, lease_structure, term_months, ti_allowance, free_rent_months,
+      lease_start_date, lease_end_date, date_signed, source, notes)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(address, city, submarket, property_type, tenant_name, landlord_name,
+    size_sf, lease_rate, lease_structure, term_months, ti_allowance, free_rent_months,
+    lease_start_date, lease_end_date, date_signed, source, notes);
+  res.status(201).json(db.prepare('SELECT * FROM lease_comps WHERE id = ?').get(result.lastInsertRowid));
+});
+
+app.put('/api/comps/leases/:id', (req, res) => {
+  const { address, city, submarket, property_type, tenant_name, landlord_name, size_sf,
+    lease_rate, lease_structure, term_months, ti_allowance, free_rent_months,
+    lease_start_date, lease_end_date, date_signed, source, notes } = req.body;
+  const result = db.prepare(`
+    UPDATE lease_comps SET address=?, city=?, submarket=?, property_type=?, tenant_name=?, landlord_name=?,
+      size_sf=?, lease_rate=?, lease_structure=?, term_months=?, ti_allowance=?, free_rent_months=?,
+      lease_start_date=?, lease_end_date=?, date_signed=?, source=?, notes=?,
+      updated_at=CURRENT_TIMESTAMP
+    WHERE id=?
+  `).run(address, city, submarket, property_type, tenant_name, landlord_name,
+    size_sf, lease_rate, lease_structure, term_months, ti_allowance, free_rent_months,
+    lease_start_date, lease_end_date, date_signed, source, notes, req.params.id);
+  if (result.changes === 0) return res.status(404).json({ error: 'Not found' });
+  res.json(db.prepare('SELECT * FROM lease_comps WHERE id = ?').get(req.params.id));
+});
+
+app.delete('/api/comps/leases/:id', (req, res) => {
+  const result = db.prepare('DELETE FROM lease_comps WHERE id = ?').run(req.params.id);
+  if (result.changes === 0) return res.status(404).json({ error: 'Not found' });
+  res.json({ success: true });
+});
+
+app.get('/api/comps/sales', (req, res) => {
+  const { property_type, submarket } = req.query;
+  const conditions = [];
+  const params = [];
+  if (property_type) { conditions.push('property_type = ?'); params.push(property_type); }
+  if (submarket) { conditions.push('submarket LIKE ?'); params.push(`%${submarket}%`); }
+  let sql = 'SELECT * FROM sale_comps';
+  if (conditions.length) sql += ' WHERE ' + conditions.join(' AND ');
+  sql += ' ORDER BY close_date DESC, created_at DESC';
+  res.json(db.prepare(sql).all(...params));
+});
+
+app.get('/api/comps/sales/:id', (req, res) => {
+  const row = db.prepare('SELECT * FROM sale_comps WHERE id = ?').get(req.params.id);
+  if (!row) return res.status(404).json({ error: 'Not found' });
+  res.json(row);
+});
+
+app.post('/api/comps/sales', (req, res) => {
+  const { address, city, submarket, property_type, buyer_name, seller_name,
+    size_sf, land_acres, sale_price, noi, cap_rate, year_built, occupancy_pct,
+    close_date, source, notes } = req.body;
+  if (!address) return res.status(400).json({ error: 'Address is required' });
+  const price_per_sf = (sale_price && size_sf && size_sf > 0) ? sale_price / size_sf : null;
+  const result = db.prepare(`
+    INSERT INTO sale_comps (address, city, submarket, property_type, buyer_name, seller_name,
+      size_sf, land_acres, sale_price, price_per_sf, noi, cap_rate, year_built, occupancy_pct,
+      close_date, source, notes)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(address, city, submarket, property_type, buyer_name, seller_name,
+    size_sf, land_acres, sale_price, price_per_sf, noi, cap_rate, year_built, occupancy_pct,
+    close_date, source, notes);
+  res.status(201).json(db.prepare('SELECT * FROM sale_comps WHERE id = ?').get(result.lastInsertRowid));
+});
+
+app.put('/api/comps/sales/:id', (req, res) => {
+  const { address, city, submarket, property_type, buyer_name, seller_name,
+    size_sf, land_acres, sale_price, noi, cap_rate, year_built, occupancy_pct,
+    close_date, source, notes } = req.body;
+  const price_per_sf = (sale_price && size_sf && size_sf > 0) ? sale_price / size_sf : null;
+  const result = db.prepare(`
+    UPDATE sale_comps SET address=?, city=?, submarket=?, property_type=?, buyer_name=?, seller_name=?,
+      size_sf=?, land_acres=?, sale_price=?, price_per_sf=?, noi=?, cap_rate=?, year_built=?,
+      occupancy_pct=?, close_date=?, source=?, notes=?, updated_at=CURRENT_TIMESTAMP
+    WHERE id=?
+  `).run(address, city, submarket, property_type, buyer_name, seller_name,
+    size_sf, land_acres, sale_price, price_per_sf, noi, cap_rate, year_built, occupancy_pct,
+    close_date, source, notes, req.params.id);
+  if (result.changes === 0) return res.status(404).json({ error: 'Not found' });
+  res.json(db.prepare('SELECT * FROM sale_comps WHERE id = ?').get(req.params.id));
+});
+
+app.delete('/api/comps/sales/:id', (req, res) => {
+  const result = db.prepare('DELETE FROM sale_comps WHERE id = ?').run(req.params.id);
+  if (result.changes === 0) return res.status(404).json({ error: 'Not found' });
+  res.json({ success: true });
+});
+
+// ─── Deal Documents ────────────────────────────────────────────────────────────
+
+app.get('/api/deals/:id/documents', (req, res) => {
+  const rows = db.prepare('SELECT * FROM deal_documents WHERE deal_id = ? ORDER BY sort_order ASC, id ASC').all(req.params.id);
+  res.json(rows);
+});
+
+app.post('/api/deals/:id/documents', (req, res) => {
+  const { doc_name, status, due_date, notes } = req.body;
+  if (!doc_name) return res.status(400).json({ error: 'Document name is required' });
+  const maxOrder = db.prepare('SELECT MAX(sort_order) as m FROM deal_documents WHERE deal_id = ?').get(req.params.id);
+  const sort_order = (maxOrder.m || 0) + 1;
+  const result = db.prepare(`
+    INSERT INTO deal_documents (deal_id, doc_name, status, due_date, notes, sort_order)
+    VALUES (?, ?, ?, ?, ?, ?)
+  `).run(req.params.id, doc_name, status || 'pending', due_date, notes, sort_order);
+  res.status(201).json(db.prepare('SELECT * FROM deal_documents WHERE id = ?').get(result.lastInsertRowid));
+});
+
+app.put('/api/deals/:id/documents/reorder', (req, res) => {
+  const { items } = req.body;
+  const update = db.prepare('UPDATE deal_documents SET sort_order = ? WHERE id = ? AND deal_id = ?');
+  items.forEach(({ id, sort_order }) => update.run(sort_order, id, req.params.id));
+  res.json({ success: true });
+});
+
+app.put('/api/deals/:id/documents/:docId', (req, res) => {
+  const { status, due_date, completed_date, notes } = req.body;
+  const result = db.prepare(`
+    UPDATE deal_documents SET status=?, due_date=?, completed_date=?, notes=?
+    WHERE id=? AND deal_id=?
+  `).run(status, due_date, completed_date, notes, req.params.docId, req.params.id);
+  if (result.changes === 0) return res.status(404).json({ error: 'Not found' });
+  res.json(db.prepare('SELECT * FROM deal_documents WHERE id = ?').get(req.params.docId));
+});
+
+app.delete('/api/deals/:id/documents/:docId', (req, res) => {
+  const result = db.prepare('DELETE FROM deal_documents WHERE id = ? AND deal_id = ?').run(req.params.docId, req.params.id);
+  if (result.changes === 0) return res.status(404).json({ error: 'Not found' });
+  res.json({ success: true });
+});
+
+// ─── Vendors ──────────────────────────────────────────────────────────────────
+
+app.get('/api/vendors', (req, res) => {
+  const { vendor_type, preferred } = req.query;
+  const conditions = [];
+  const params = [];
+  if (vendor_type) { conditions.push('vendor_type = ?'); params.push(vendor_type); }
+  if (preferred === '1') { conditions.push('preferred = 1'); }
+  let sql = 'SELECT * FROM vendors';
+  if (conditions.length) sql += ' WHERE ' + conditions.join(' AND ');
+  sql += ' ORDER BY preferred DESC, name ASC';
+  res.json(db.prepare(sql).all(...params));
+});
+
+app.get('/api/vendors/:id', (req, res) => {
+  const row = db.prepare('SELECT * FROM vendors WHERE id = ?').get(req.params.id);
+  if (!row) return res.status(404).json({ error: 'Not found' });
+  res.json(row);
+});
+
+app.post('/api/vendors', (req, res) => {
+  const { name, company, vendor_type, specialty, email, phone, address, city, preferred, rating, notes } = req.body;
+  if (!name) return res.status(400).json({ error: 'Name is required' });
+  if (!vendor_type) return res.status(400).json({ error: 'Vendor type is required' });
+  const result = db.prepare(`
+    INSERT INTO vendors (name, company, vendor_type, specialty, email, phone, address, city, preferred, rating, notes)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(name, company, vendor_type, specialty, email, phone, address, city, preferred ? 1 : 0, rating, notes);
+  res.status(201).json(db.prepare('SELECT * FROM vendors WHERE id = ?').get(result.lastInsertRowid));
+});
+
+app.put('/api/vendors/:id', (req, res) => {
+  const { name, company, vendor_type, specialty, email, phone, address, city, preferred, rating, notes } = req.body;
+  const result = db.prepare(`
+    UPDATE vendors SET name=?, company=?, vendor_type=?, specialty=?, email=?, phone=?,
+      address=?, city=?, preferred=?, rating=?, notes=?, updated_at=CURRENT_TIMESTAMP
+    WHERE id=?
+  `).run(name, company, vendor_type, specialty, email, phone, address, city, preferred ? 1 : 0, rating, notes, req.params.id);
+  if (result.changes === 0) return res.status(404).json({ error: 'Not found' });
+  res.json(db.prepare('SELECT * FROM vendors WHERE id = ?').get(req.params.id));
+});
+
+app.delete('/api/vendors/:id', (req, res) => {
+  const result = db.prepare('DELETE FROM vendors WHERE id = ?').run(req.params.id);
+  if (result.changes === 0) return res.status(404).json({ error: 'Not found' });
+  res.json({ success: true });
+});
+
+// ─── Deal Vendors ─────────────────────────────────────────────────────────────
+
+app.get('/api/deals/:id/vendors', (req, res) => {
+  const rows = db.prepare(`
+    SELECT dv.*, v.name, v.company, v.vendor_type, v.specialty, v.phone, v.email, v.preferred
+    FROM deal_vendors dv
+    JOIN vendors v ON dv.vendor_id = v.id
+    WHERE dv.deal_id = ?
+    ORDER BY v.name ASC
+  `).all(req.params.id);
+  res.json(rows);
+});
+
+app.post('/api/deals/:id/vendors', (req, res) => {
+  const { vendor_id, role } = req.body;
+  if (!vendor_id) return res.status(400).json({ error: 'Vendor ID is required' });
+  try {
+    db.prepare('INSERT INTO deal_vendors (deal_id, vendor_id, role) VALUES (?, ?, ?)').run(req.params.id, vendor_id, role);
+    const row = db.prepare(`
+      SELECT dv.*, v.name, v.company, v.vendor_type, v.specialty, v.phone, v.email
+      FROM deal_vendors dv JOIN vendors v ON dv.vendor_id = v.id
+      WHERE dv.deal_id = ? AND dv.vendor_id = ?
+    `).get(req.params.id, vendor_id);
+    res.status(201).json(row);
+  } catch (e) {
+    res.status(409).json({ error: 'Vendor already linked to this deal' });
+  }
+});
+
+app.delete('/api/deals/:id/vendors/:vid', (req, res) => {
+  const result = db.prepare('DELETE FROM deal_vendors WHERE deal_id = ? AND vendor_id = ?').run(req.params.id, req.params.vid);
+  if (result.changes === 0) return res.status(404).json({ error: 'Not found' });
+  res.json({ success: true });
 });
 
 // ─── Fallback SPA ─────────────────────────────────────────────────────────────

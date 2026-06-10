@@ -21,9 +21,10 @@ PAGE_LOADERS.dashboard = async function loadDashboard() {
   const el = document.getElementById('page-dashboard');
   el.innerHTML = '<p style="color:var(--text-muted);padding:20px">Loading...</p>';
 
-  const [data, activity] = await Promise.all([
+  const [data, activity, recentActivities] = await Promise.all([
     API.get('/api/dashboard/summary').catch(() => null),
-    API.get('/api/activity').catch(() => [])
+    API.get('/api/activity').catch(() => []),
+    API.get('/api/activities/recent').catch(() => [])
   ]);
   if (!data) {
     el.innerHTML = '<p style="color:var(--red);padding:20px">Failed to load dashboard.</p>';
@@ -140,11 +141,27 @@ PAGE_LOADERS.dashboard = async function loadDashboard() {
 
     <div id="gmail-widget" class="gmail-widget" style="display:none"></div>
 
-    <div class="activity-panel">
-      <div class="panel-title" style="margin-bottom:16px;padding-bottom:10px;border-bottom:1px solid var(--border)">
-        Recent Activity
+    <div class="panels-row" style="margin-top:16px">
+      <div class="panel">
+        <div class="panel-title">Recent Activity Log</div>
+        ${recentActivities.slice(0,5).length === 0
+          ? '<p style="color:var(--text-muted);font-size:13px">No activities logged yet.</p>'
+          : recentActivities.slice(0,5).map(a => {
+              const actBadgeColors = { call:'#dbeafe|#1e40af', email:'#ede9fe|#4c1d95', meeting:'#ccfbf1|#115e59', site_tour:'#ffedd5|#9a3412', loi_sent:'#dcfce7|#14532d', loi_countered:'#dcfce7|#14532d', lease_sent:'#dcfce7|#14532d', lease_executed:'#dcfce7|#14532d', voicemail:'#f1f5f9|#64748b', text:'#f1f5f9|#64748b', other:'#f1f5f9|#64748b' };
+              const [bg, color] = (actBadgeColors[a.activity_type] || '#f1f5f9|#64748b').split('|');
+              const daysAgo = Math.floor((Date.now() - new Date(a.activity_date).getTime()) / 86400000);
+              const ago = daysAgo === 0 ? 'Today' : daysAgo === 1 ? '1d ago' : daysAgo + 'd ago';
+              return `<div class="recent-act-item">
+                <span style="background:${bg};color:${color};padding:2px 8px;border-radius:999px;font-size:11px;font-weight:600;white-space:nowrap">${(a.activity_type||'').replace(/_/g,' ')}</span>
+                <span class="recent-act-text">${a.summary}${a.contact_name ? ' — ' + a.contact_name : ''}</span>
+                <span class="recent-act-meta">${ago}</span>
+              </div>`;
+            }).join('')}
       </div>
-      <div id="activity-feed"><p style="color:var(--text-muted);font-size:13px">Loading…</p></div>
+      <div class="panel">
+        <div class="panel-title">Recent Notes</div>
+        <div id="activity-feed"><p style="color:var(--text-muted);font-size:13px">Loading…</p></div>
+      </div>
     </div>
   `;
 

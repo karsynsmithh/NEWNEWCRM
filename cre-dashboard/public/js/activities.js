@@ -14,9 +14,9 @@ function actBadge(type) {
   return `<span class="act-badge ${cls}">${(type || '').replace(/_/g, ' ')}</span>`;
 }
 
-function timeAgo(dateStr) {
+function _actTimeAgo(dateStr) {
   if (!dateStr) return '—';
-  const diff = Math.floor((Date.now() - new Date(dateStr).getTime()) / 86400000);
+  const diff = Math.floor((Date.now() - new Date(String(dateStr).replace(' ', 'T')).getTime()) / 86400000);
   if (diff === 0) return 'Today';
   if (diff === 1) return '1 day ago';
   if (diff < 30) return `${diff} days ago`;
@@ -75,7 +75,7 @@ async function loadActivities() {
               ? `<tr><td colspan="7"><div class="empty-state"><div class="empty-state-icon">&#128203;</div><div class="empty-state-text">No activities logged yet.</div></div></td></tr>`
               : filtered.map(a => `
                 <tr>
-                  <td style="white-space:nowrap">${fmtDateTime(a.activity_date)}</td>
+                  <td style="white-space:nowrap">${_actFmtDateTime(a.activity_date)}</td>
                   <td>${actBadge(a.activity_type)}</td>
                   <td>${a.summary}</td>
                   <td>${a.contact_id
@@ -102,9 +102,9 @@ async function loadActivities() {
   document.getElementById('filter-act-contact').addEventListener('input', e => { el._contactSearch = e.target.value; loadActivities(); });
 }
 
-function fmtDateTime(dt) {
+function _actFmtDateTime(dt) {
   if (!dt) return '—';
-  const d = new Date(dt);
+  const d = new Date(String(dt).replace(' ', 'T'));
   if (isNaN(d)) return dt;
   return d.toLocaleDateString('en-US', { month: '2-digit', day: '2-digit', year: 'numeric' }) +
     ' ' + d.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' });

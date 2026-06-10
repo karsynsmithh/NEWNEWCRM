@@ -197,7 +197,8 @@ const PAGE_LOADERS = {};
 function navigate(page) {
   if (!PAGES.includes(page)) page = 'dashboard';
   PAGES.forEach(p => {
-    document.getElementById(`page-${p}`).classList.toggle('active', p === page);
+    const pageEl = document.getElementById(`page-${p}`);
+    if (pageEl) pageEl.classList.toggle('active', p === page);
   });
   document.querySelectorAll('.nav-link').forEach(a => {
     a.classList.toggle('active', a.dataset.page === page);

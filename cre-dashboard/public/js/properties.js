@@ -59,7 +59,9 @@ async function loadProperties() {
             ${rows.length === 0 ? `<tr><td colspan="9"><div class="empty-state"><div class="empty-state-icon">&#127970;</div><div class="empty-state-text">No properties yet. Add your first listing.</div></div></td></tr>` :
               rows.map(p => `
                 <tr>
-                  <td><strong>${p.address}</strong>${suiteAvailabilityBadge(p)}${noteCountChip(p.note_count)}${p.city ? `<br><small style="color:var(--text-muted)">${p.city}, ${p.state || 'TX'}</small>` : ''}</td>
+                  <td>
+                    <a class="property-address-link" href="#" onclick="openPropertyProfile(${p.id});return false"><strong>${p.address}</strong></a>${suiteAvailabilityBadge(p)}${noteCountChip(p.note_count)}${p.city ? `<br><small style="color:var(--text-muted)">${p.city}, ${p.state || 'TX'}</small>` : ''}
+                  </td>
                   <td>${p.property_type ? p.property_type.replace(/-/g,' ') : '—'}</td>
                   <td>${fmtSF(p.size_sf)}</td>
                   <td>${p.asking_rate ? fmt$(p.asking_rate) : '—'}</td>
@@ -402,3 +404,90 @@ async function deleteSuite(suiteId) {
     toast('Error deleting suite', 'error');
   }
 }
+
+// ─── Property Profile (read-only view) ───────────────────────────────────────
+
+window.openPropertyProfile = async function(id) {
+  const [p, suites, notes] = await Promise.all([
+    API.get(`/api/properties/${id}`),
+    API.get(`/api/properties/${id}/suites`).catch(() => []),
+    API.get(`/api/notes?property_id=${id}`).catch(() => [])
+  ]);
+
+  const suitesHtml = suites.length === 0
+    ? '<p style="color:var(--text-muted);font-size:13px">No suites added yet.</p>'
+    : `<table class="suites-table" style="width:100%">
+        <thead><tr><th>Suite</th><th>SF</th><th>Rate $/SF/yr</th><th>Status</th><th>Floor</th></tr></thead>
+        <tbody>${suites.map(s => `
+          <tr>
+            <td><strong>${escapeHtml(s.suite_name)}</strong></td>
+            <td>${fmtSF(s.size_sf)}</td>
+            <td>${s.asking_rate ? fmtRate(s.asking_rate) : '—'}</td>
+            <td>${badge(s.status, STATUS_MAP)}</td>
+            <td>${s.floor ? escapeHtml(s.floor) : '—'}</td>
+          </tr>`).join('')}
+        </tbody>
+      </table>`;
+
+  const notesHtml = notes.length === 0
+    ? '<p style="color:var(--text-muted);font-size:13px">No notes yet.</p>'
+    : notes.slice(0, 5).map(n => `
+        <div class="note-card" style="margin-bottom:8px">
+          <div class="note-card-header">
+            <span class="note-date">${fmtDateTime(n.note_date)}</span>
+          </div>
+          <div class="note-text">${escapeHtml(n.note_text)}</div>
+        </div>`).join('');
+
+  const html = `
+    <div class="profile-header">
+      <div>
+        <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+          <h2 style="margin:0;font-size:18px">${escapeHtml(p.address)}</h2>
+          ${badge(p.status, STATUS_MAP)}
+        </div>
+        ${p.city ? `<div style="color:var(--text-muted);font-size:13px;margin-top:4px">${escapeHtml(p.city)}, ${escapeHtml(p.state || 'TX')}</div>` : ''}
+      </div>
+      <button class="btn btn-primary btn-sm" onclick="modal.close();editProperty(${p.id})">Edit Property</button>
+    </div>
+
+    <div class="profile-grid">
+      <div class="profile-field"><span class="profile-label">Type</span><span>${p.property_type ? p.property_type.replace(/-/g, ' ') : '—'}</span></div>
+      <div class="profile-field"><span class="profile-label">Size</span><span>${fmtSF(p.size_sf)}</span></div>
+      <div class="profile-field"><span class="profile-label">Asking Rate</span><span>${p.asking_rate ? fmtRate(p.asking_rate) + '/SF/yr' : '—'}</span></div>
+      <div class="profile-field"><span class="profile-label">Asking Price</span><span>${p.asking_price ? fmt$(p.asking_price) : '—'}</span></div>
+      <div class="profile-field"><span class="profile-label">Rep Type</span><span>${p.rep_type ? p.rep_type.replace(/_/g, ' ') : '—'}</span></div>
+      <div class="profile-field"><span class="profile-label">Year Built</span><span>${p.year_built || '—'}</span></div>
+    </div>
+
+    ${(p.owner_name || p.owner_phone || p.owner_email) ? `
+    <div class="profile-section">
+      <div class="profile-section-title">Owner / Contact</div>
+      <div class="profile-grid">
+        ${p.owner_name ? `<div class="profile-field"><span class="profile-label">Name</span><span>${escapeHtml(p.owner_name)}</span></div>` : ''}
+        ${p.owner_phone ? `<div class="profile-field"><span class="profile-label">Phone</span><span>${escapeHtml(p.owner_phone)}</span></div>` : ''}
+        ${p.owner_email ? `<div class="profile-field"><span class="profile-label">Email</span><span><a href="mailto:${escapeHtml(p.owner_email)}" class="teal-link">${escapeHtml(p.owner_email)}</a></span></div>` : ''}
+      </div>
+    </div>` : ''}
+
+    ${p.notes ? `
+    <div class="profile-section">
+      <div class="profile-section-title">Property Notes</div>
+      <div style="font-size:13px;color:var(--text-secondary);white-space:pre-wrap">${escapeHtml(p.notes)}</div>
+    </div>` : ''}
+
+    <div class="profile-section">
+      <div class="profile-section-title">Suites / Spaces <span style="font-weight:400;color:var(--text-muted)">(${suites.length})</span></div>
+      ${suitesHtml}
+    </div>
+
+    <div class="profile-section">
+      <div class="profile-section-title">Recent Notes <span style="font-weight:400;color:var(--text-muted)">(${notes.length})</span></div>
+      ${notesHtml}
+      ${notes.length > 5 ? `<p style="font-size:12px;color:var(--text-muted);margin-top:6px">Showing 5 of ${notes.length} — open Edit to see all</p>` : ''}
+    </div>
+  `;
+
+  modal.open(`Property Profile`, html, null);
+  document.getElementById('modal-save').style.display = 'none';
+};

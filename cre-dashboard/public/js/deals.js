@@ -53,7 +53,7 @@ async function loadDeals() {
               ? `<tr><td colspan="10"><div class="empty-state"><div class="empty-state-icon">&#129309;</div><div class="empty-state-text">No deals yet. Add your first deal.</div></div></td></tr>`
               : deals.map(d => `
                 <tr>
-                  <td><strong>${d.deal_name}</strong></td>
+                  <td><strong>${d.deal_name}</strong>${noteCountChip(d.note_count)}</td>
                   <td>${d.deal_type || '—'}</td>
                   <td style="max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${d.property_address || '—'}</td>
                   <td>${d.tenant_buyer_name || '—'}</td>
@@ -234,7 +234,16 @@ window.calcLeaseValue = function() {
 };
 
 function openDealModal(d = {}) {
-  modal.open(d.id ? 'Edit Deal' : 'Add Deal', dealForm(d), async () => {
+  const html = d.id ? `
+    <div class="modal-tabs">
+      <button type="button" class="modal-tab active" data-tab="details">Details</button>
+      <button type="button" class="modal-tab" data-tab="notes">Notes</button>
+    </div>
+    <div class="modal-tab-pane" id="tab-details">${dealForm(d)}</div>
+    <div class="modal-tab-pane" id="tab-notes" style="display:none">${notesTabHtml()}</div>
+  ` : dealForm(d);
+
+  modal.open(d.id ? 'Edit Deal' : 'Add Deal', html, async () => {
     if (!requireField('deal_name', 'Deal name is required')) return;
     const data = formData([
       'deal_name','deal_type','property_id','tenant_buyer_id','landlord_seller_id','status',
@@ -257,6 +266,11 @@ function openDealModal(d = {}) {
       toast('Error saving deal', 'error');
     }
   });
+
+  if (d.id) {
+    initModalTabs();
+    loadNotesTab('deal_id', d.id);
+  }
 }
 
 async function editDeal(id) {

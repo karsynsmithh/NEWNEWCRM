@@ -84,6 +84,32 @@ _db.exec(`
     completed INTEGER DEFAULT 0,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
   );
+
+  CREATE TABLE IF NOT EXISTS property_suites (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    property_id INTEGER NOT NULL REFERENCES properties(id) ON DELETE CASCADE,
+    suite_name TEXT NOT NULL,
+    size_sf REAL,
+    asking_rate REAL,
+    asking_price REAL,
+    status TEXT DEFAULT 'available' CHECK(status IN (
+      'available','under_contract','leased','sold','off_market'
+    )),
+    floor TEXT,
+    notes TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  );
+
+  CREATE TABLE IF NOT EXISTS notes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    note_text TEXT NOT NULL,
+    note_date DATETIME DEFAULT CURRENT_TIMESTAMP,
+    property_id INTEGER REFERENCES properties(id) ON DELETE CASCADE,
+    contact_id INTEGER REFERENCES contacts(id) ON DELETE CASCADE,
+    deal_id INTEGER REFERENCES deals(id) ON DELETE CASCADE,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  );
 `);
 
 // node:sqlite rejects undefined params — coerce to null

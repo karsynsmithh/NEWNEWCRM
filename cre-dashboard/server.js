@@ -15,10 +15,15 @@ app.use(express.static(path.join(__dirname, 'public')));
 
 app.get('/api/properties', (req, res) => {
   const { status } = req.query;
-  let sql = 'SELECT * FROM properties';
+  let sql = `
+    SELECT p.*,
+      (SELECT COUNT(*) FROM property_suites s WHERE s.property_id = p.id) AS suite_count,
+      (SELECT COUNT(*) FROM property_suites s WHERE s.property_id = p.id AND s.status = 'available') AS available_suite_count,
+      (SELECT COUNT(*) FROM notes n WHERE n.property_id = p.id) AS note_count
+    FROM properties p`;
   const params = [];
-  if (status) { sql += ' WHERE status = ?'; params.push(status); }
-  sql += ' ORDER BY created_at DESC';
+  if (status) { sql += ' WHERE p.status = ?'; params.push(status); }
+  sql += ' ORDER BY p.created_at DESC';
   res.json(db.prepare(sql).all(...params));
 });
 
@@ -65,6 +70,52 @@ app.delete('/api/properties/:id', (req, res) => {
   res.json({ success: true });
 });
 
+// ─── Property Suites ──────────────────────────────────────────────────────────
+
+app.get('/api/properties/:id/suites', (req, res) => {
+  const rows = db.prepare(
+    'SELECT * FROM property_suites WHERE property_id = ? ORDER BY suite_name ASC'
+  ).all(req.params.id);
+  res.json(rows);
+});
+
+app.post('/api/properties/:id/suites', (req, res) => {
+  const property = db.prepare('SELECT id FROM properties WHERE id = ?').get(req.params.id);
+  if (!property) return res.status(404).json({ error: 'Property not found' });
+
+  const { suite_name, size_sf, asking_rate, asking_price, status, floor, notes } = req.body;
+  if (!suite_name) return res.status(400).json({ error: 'Suite name is required' });
+
+  const result = db.prepare(`
+    INSERT INTO property_suites (property_id, suite_name, size_sf, asking_rate, asking_price, status, floor, notes)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(req.params.id, suite_name, size_sf, asking_rate, asking_price, status || 'available', floor, notes);
+
+  res.status(201).json(db.prepare('SELECT * FROM property_suites WHERE id = ?').get(result.lastInsertRowid));
+});
+
+app.put('/api/properties/:id/suites/:sid', (req, res) => {
+  const { suite_name, size_sf, asking_rate, asking_price, status, floor, notes } = req.body;
+  if (!suite_name) return res.status(400).json({ error: 'Suite name is required' });
+
+  const result = db.prepare(`
+    UPDATE property_suites SET suite_name=?, size_sf=?, asking_rate=?, asking_price=?,
+      status=?, floor=?, notes=?, updated_at=CURRENT_TIMESTAMP
+    WHERE id=? AND property_id=?
+  `).run(suite_name, size_sf, asking_rate, asking_price, status || 'available', floor, notes,
+    req.params.sid, req.params.id);
+
+  if (result.changes === 0) return res.status(404).json({ error: 'Not found' });
+  res.json(db.prepare('SELECT * FROM property_suites WHERE id = ?').get(req.params.sid));
+});
+
+app.delete('/api/properties/:id/suites/:sid', (req, res) => {
+  const result = db.prepare('DELETE FROM property_suites WHERE id = ? AND property_id = ?')
+    .run(req.params.sid, req.params.id);
+  if (result.changes === 0) return res.status(404).json({ error: 'Not found' });
+  res.json({ success: true });
+});
+
 // ─── Contacts ─────────────────────────────────────────────────────────────────
 
 app.get('/api/contacts', (req, res) => {
@@ -73,7 +124,10 @@ app.get('/api/contacts', (req, res) => {
   const params = [];
   if (stage) { conditions.push('pipeline_stage = ?'); params.push(stage); }
   if (type) { conditions.push('contact_type = ?'); params.push(type); }
-  let sql = 'SELECT * FROM contacts';
+  let sql = `
+    SELECT contacts.*,
+      (SELECT COUNT(*) FROM notes n WHERE n.contact_id = contacts.id) AS note_count
+    FROM contacts`;
   if (conditions.length) sql += ' WHERE ' + conditions.join(' AND ');
   sql += ' ORDER BY created_at DESC';
   res.json(db.prepare(sql).all(...params));
@@ -166,7 +220,8 @@ app.get('/api/deals', (req, res) => {
     SELECT d.*,
       p.address as property_address,
       c1.name as tenant_buyer_name,
-      c2.name as landlord_seller_name
+      c2.name as landlord_seller_name,
+      (SELECT COUNT(*) FROM notes n WHERE n.deal_id = d.id) AS note_count
     FROM deals d
     LEFT JOIN properties p ON d.property_id = p.id
     LEFT JOIN contacts c1 ON d.tenant_buyer_id = c1.id
@@ -316,6 +371,57 @@ app.delete('/api/followups/:id', (req, res) => {
   res.json({ success: true });
 });
 
+// ─── Notes ────────────────────────────────────────────────────────────────────
+
+app.get('/api/notes', (req, res) => {
+  const { property_id, contact_id, deal_id } = req.query;
+  let field, value;
+  if (property_id) { field = 'property_id'; value = property_id; }
+  else if (contact_id) { field = 'contact_id'; value = contact_id; }
+  else if (deal_id) { field = 'deal_id'; value = deal_id; }
+  else return res.status(400).json({ error: 'property_id, contact_id, or deal_id is required' });
+
+  const rows = db.prepare(
+    `SELECT * FROM notes WHERE ${field} = ? ORDER BY note_date DESC, id DESC`
+  ).all(value);
+  res.json(rows);
+});
+
+app.post('/api/notes', (req, res) => {
+  const { note_text, note_date, property_id, contact_id, deal_id } = req.body;
+  if (!note_text || !note_text.trim()) return res.status(400).json({ error: 'Note text is required' });
+
+  const linked = [property_id, contact_id, deal_id].filter(v => v != null && v !== '');
+  if (linked.length !== 1) {
+    return res.status(400).json({ error: 'Exactly one of property_id, contact_id, or deal_id is required' });
+  }
+
+  const result = db.prepare(`
+    INSERT INTO notes (note_text, note_date, property_id, contact_id, deal_id)
+    VALUES (?, COALESCE(?, CURRENT_TIMESTAMP), ?, ?, ?)
+  `).run(note_text.trim(), note_date || null, property_id || null, contact_id || null, deal_id || null);
+
+  res.status(201).json(db.prepare('SELECT * FROM notes WHERE id = ?').get(result.lastInsertRowid));
+});
+
+app.put('/api/notes/:id', (req, res) => {
+  const { note_text, note_date } = req.body;
+  if (!note_text || !note_text.trim()) return res.status(400).json({ error: 'Note text is required' });
+
+  const existing = db.prepare('SELECT * FROM notes WHERE id = ?').get(req.params.id);
+  if (!existing) return res.status(404).json({ error: 'Not found' });
+
+  db.prepare('UPDATE notes SET note_text = ?, note_date = COALESCE(?, note_date) WHERE id = ?')
+    .run(note_text.trim(), note_date || null, req.params.id);
+  res.json(db.prepare('SELECT * FROM notes WHERE id = ?').get(req.params.id));
+});
+
+app.delete('/api/notes/:id', (req, res) => {
+  const result = db.prepare('DELETE FROM notes WHERE id = ?').run(req.params.id);
+  if (result.changes === 0) return res.status(404).json({ error: 'Not found' });
+  res.json({ success: true });
+});
+
 // ─── Dashboard Summary ────────────────────────────────────────────────────────
 
 app.get('/api/dashboard/summary', (req, res) => {
@@ -327,6 +433,10 @@ app.get('/api/dashboard/summary', (req, res) => {
 
   const active_listings = db.prepare(
     "SELECT COUNT(*) as c FROM properties WHERE status = 'active'"
+  ).get().c;
+
+  const available_suites = db.prepare(
+    "SELECT COUNT(*) as c FROM property_suites WHERE status = 'available'"
   ).get().c;
 
   const pipeline_value = db.prepare(
@@ -381,6 +491,7 @@ app.get('/api/dashboard/summary', (req, res) => {
 
   res.json({
     active_listings,
+    available_suites,
     pipeline_value,
     deals_closing_soon,
     followups_due_today,

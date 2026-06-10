@@ -56,7 +56,7 @@ async function loadProperties() {
             ${rows.length === 0 ? `<tr><td colspan="9"><div class="empty-state"><div class="empty-state-icon">&#127970;</div><div class="empty-state-text">No properties yet. Add your first listing.</div></div></td></tr>` :
               rows.map(p => `
                 <tr>
-                  <td><strong>${p.address}</strong>${p.city ? `<br><small style="color:var(--text-muted)">${p.city}, ${p.state || 'TX'}</small>` : ''}</td>
+                  <td><strong>${p.address}</strong>${suiteAvailabilityBadge(p)}${noteCountChip(p.note_count)}${p.city ? `<br><small style="color:var(--text-muted)">${p.city}, ${p.state || 'TX'}</small>` : ''}</td>
                   <td>${p.property_type ? p.property_type.replace(/-/g,' ') : '—'}</td>
                   <td>${fmtSF(p.size_sf)}</td>
                   <td>${p.asking_rate ? fmt$(p.asking_rate) : '—'}</td>
@@ -85,6 +85,21 @@ async function loadProperties() {
   document.getElementById('filter-type').addEventListener('change', e => { el._typeFilter = e.target.value; loadProperties(); });
   document.getElementById('filter-rep').addEventListener('change', e => { el._repFilter = e.target.value; loadProperties(); });
   document.getElementById('add-property-btn').addEventListener('click', () => openPropertyModal());
+}
+
+// "3 available" (green) or "All leased" (gray) shown next to the address
+function suiteAvailabilityBadge(p) {
+  if (!p.suite_count) return '';
+  if (p.available_suite_count > 0) {
+    return ` <span class="badge badge-available">${p.available_suite_count} available</span>`;
+  }
+  return ' <span class="badge badge-leased">All leased</span>';
+}
+
+// $/SF/yr with 2 decimals, e.g. $18.00
+function fmtRate(n) {
+  if (n == null || n === '' || isNaN(n)) return '—';
+  return '$' + Number(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 
 function propertyForm(p = {}) {
@@ -162,7 +177,19 @@ function propertyForm(p = {}) {
 }
 
 function openPropertyModal(p = {}) {
-  modal.open(p.id ? 'Edit Property' : 'Add Property', propertyForm(p), async () => {
+  // Edit gets tabs (Details | Suites | Notes); add is just the details form
+  const html = p.id ? `
+    <div class="modal-tabs">
+      <button type="button" class="modal-tab active" data-tab="details">Details</button>
+      <button type="button" class="modal-tab" data-tab="suites">Suites / Spaces</button>
+      <button type="button" class="modal-tab" data-tab="notes">Notes</button>
+    </div>
+    <div class="modal-tab-pane" id="tab-details">${propertyForm(p)}</div>
+    <div class="modal-tab-pane" id="tab-suites" style="display:none">${suitesTabHtml()}</div>
+    <div class="modal-tab-pane" id="tab-notes" style="display:none">${notesTabHtml()}</div>
+  ` : propertyForm(p);
+
+  modal.open(p.id ? 'Edit Property' : 'Add Property', html, async () => {
     if (!requireField('address', 'Address is required')) return;
     const data = formData(['address','city','state','property_type','size_sf','asking_rate','asking_price','rep_type','status','owner_name','owner_phone','owner_email','year_built','notes']);
     try {
@@ -179,6 +206,12 @@ function openPropertyModal(p = {}) {
       toast('Error saving property', 'error');
     }
   });
+
+  if (p.id) {
+    initModalTabs();
+    loadSuitesTab(p.id);
+    loadNotesTab('property_id', p.id);
+  }
 }
 
 async function editProperty(id) {
@@ -191,4 +224,175 @@ async function deleteProperty(id) {
   await API.delete(`/api/properties/${id}`);
   toast('Property deleted');
   loadProperties();
+}
+
+// ─── Suites / Spaces tab ──────────────────────────────────────────────────────
+
+const SUITE_STATUSES = ['available', 'under_contract', 'leased', 'sold', 'off_market'];
+
+let _suites = [];
+let _suitesPropertyId = null;
+
+function suitesTabHtml() {
+  return `
+    <div class="suites-summary" id="suites-summary">Loading suites…</div>
+    <div class="table-wrap">
+      <table class="suites-table">
+        <thead>
+          <tr>
+            <th>Suite Name</th><th>SF</th><th>Rate $/SF/yr</th><th>Asking Price</th>
+            <th>Floor</th><th>Status</th><th>Notes</th><th>Actions</th>
+          </tr>
+        </thead>
+        <tbody id="suites-tbody"></tbody>
+      </table>
+    </div>
+    <div id="suite-form-wrap" style="display:none"></div>
+    <div style="margin-top:12px">
+      <button type="button" class="btn btn-secondary" id="add-suite-btn" onclick="openSuiteForm()">+ Add Suite</button>
+    </div>
+  `;
+}
+
+function renderSuitesSummary() {
+  const el = document.getElementById('suites-summary');
+  if (!el) return;
+  if (_suites.length === 0) {
+    el.textContent = 'No suites added yet';
+    return;
+  }
+  const available = _suites.filter(s => s.status === 'available');
+  const parts = [`${available.length} suite${available.length === 1 ? '' : 's'} available`];
+  const sfs = available.map(s => s.size_sf).filter(v => v != null && !isNaN(v) && v !== '');
+  if (sfs.length) {
+    const min = Math.min(...sfs), max = Math.max(...sfs);
+    parts.push(min === max
+      ? `${Number(min).toLocaleString('en-US')} SF`
+      : `${Number(min).toLocaleString('en-US')}–${Number(max).toLocaleString('en-US')} SF`);
+  }
+  const rates = available.map(s => s.asking_rate).filter(v => v != null && !isNaN(v) && v !== '');
+  if (rates.length) parts.push(`From ${fmtRate(Math.min(...rates))}/SF`);
+  el.textContent = parts.join(' | ');
+}
+
+function renderSuitesTable() {
+  const tbody = document.getElementById('suites-tbody');
+  if (!tbody) return;
+  tbody.innerHTML = _suites.length === 0
+    ? '<tr><td colspan="8" style="text-align:center;color:var(--text-muted);padding:18px">No suites added yet.</td></tr>'
+    : _suites.map(s => `
+      <tr>
+        <td><strong>${escapeHtml(s.suite_name)}</strong></td>
+        <td>${fmtSF(s.size_sf)}</td>
+        <td>${s.asking_rate ? fmtRate(s.asking_rate) : '—'}</td>
+        <td>${s.asking_price ? fmt$(s.asking_price) : '—'}</td>
+        <td>${s.floor ? escapeHtml(s.floor) : '—'}</td>
+        <td>${badge(s.status, STATUS_MAP)}</td>
+        <td class="suite-notes-cell">${s.notes ? escapeHtml(s.notes) : '—'}</td>
+        <td class="actions-cell">
+          <button type="button" class="btn btn-sm btn-secondary" onclick="openSuiteForm(${s.id})">Edit</button>
+          <button type="button" class="btn btn-sm btn-danger" onclick="deleteSuite(${s.id})">Del</button>
+        </td>
+      </tr>
+    `).join('');
+  renderSuitesSummary();
+}
+
+async function loadSuitesTab(propertyId) {
+  _suitesPropertyId = propertyId;
+  _suites = await API.get(`/api/properties/${propertyId}/suites`).catch(() => []);
+  renderSuitesTable();
+}
+
+function openSuiteForm(suiteId) {
+  const s = suiteId ? (_suites.find(x => x.id === suiteId) || {}) : {};
+  const wrap = document.getElementById('suite-form-wrap');
+  wrap.style.display = '';
+  wrap.innerHTML = `
+    <div class="suite-form">
+      <div class="form-section-title">${suiteId ? 'Edit Suite' : 'Add Suite'}</div>
+      <div class="form-grid">
+        <div class="form-group">
+          <label>Suite Name *</label>
+          <input id="suite_name" value="${escapeHtml(s.suite_name || '')}" placeholder="Suite 100, End Cap, Pad Site A" />
+        </div>
+        <div class="form-group">
+          <label>Size (SF)</label>
+          <input id="suite_size_sf" type="number" value="${s.size_sf || ''}" placeholder="1200" />
+        </div>
+        <div class="form-group">
+          <label>Asking Rate ($/SF/yr)</label>
+          <input id="suite_asking_rate" type="number" step="0.01" value="${s.asking_rate || ''}" placeholder="18.00" />
+        </div>
+        <div class="form-group">
+          <label>Asking Price ($)</label>
+          <input id="suite_asking_price" type="number" value="${s.asking_price || ''}" placeholder="Optional — for sale" />
+        </div>
+        <div class="form-group">
+          <label>Floor</label>
+          <input id="suite_floor" value="${escapeHtml(s.floor || '')}" placeholder="1st Floor, Ground" />
+        </div>
+        <div class="form-group">
+          <label>Status</label>
+          <select id="suite_status">
+            ${SUITE_STATUSES.map(st => `<option value="${st}" ${(s.status || 'available') === st ? 'selected' : ''}>${st.replace(/_/g, ' ')}</option>`).join('')}
+          </select>
+        </div>
+        <div class="form-group full">
+          <label>Notes</label>
+          <textarea id="suite_notes">${escapeHtml(s.notes || '')}</textarea>
+        </div>
+      </div>
+      <div class="suite-form-actions">
+        <button type="button" class="btn btn-primary" onclick="saveSuiteForm(${suiteId || 'null'})">${suiteId ? 'Update Suite' : 'Add Suite'}</button>
+        <button type="button" class="btn btn-secondary" onclick="closeSuiteForm()">Cancel</button>
+      </div>
+    </div>
+  `;
+  document.getElementById('suite_name').focus();
+}
+
+function closeSuiteForm() {
+  const wrap = document.getElementById('suite-form-wrap');
+  wrap.style.display = 'none';
+  wrap.innerHTML = '';
+}
+
+async function saveSuiteForm(suiteId) {
+  if (!requireField('suite_name', 'Suite name is required')) return;
+  const data = {
+    suite_name: val('suite_name'),
+    size_sf: val('suite_size_sf') || null,
+    asking_rate: val('suite_asking_rate') || null,
+    asking_price: val('suite_asking_price') || null,
+    floor: val('suite_floor') || null,
+    status: val('suite_status'),
+    notes: val('suite_notes') || null
+  };
+  try {
+    if (suiteId) {
+      await API.put(`/api/properties/${_suitesPropertyId}/suites/${suiteId}`, data);
+      toast('Suite updated');
+    } else {
+      await API.post(`/api/properties/${_suitesPropertyId}/suites`, data);
+      toast('Suite added');
+    }
+    closeSuiteForm();
+    await loadSuitesTab(_suitesPropertyId);
+    loadProperties();
+  } catch (e) {
+    toast('Error saving suite', 'error');
+  }
+}
+
+async function deleteSuite(suiteId) {
+  if (!confirm('Delete this suite? This cannot be undone.')) return;
+  try {
+    await API.delete(`/api/properties/${_suitesPropertyId}/suites/${suiteId}`);
+    toast('Suite deleted');
+    await loadSuitesTab(_suitesPropertyId);
+    loadProperties();
+  } catch (e) {
+    toast('Error deleting suite', 'error');
+  }
 }

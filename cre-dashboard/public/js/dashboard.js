@@ -62,6 +62,7 @@ PAGE_LOADERS.dashboard = async function loadDashboard() {
       <div class="card">
         <div class="card-label">Active Listings</div>
         <div class="card-value">${data.active_listings}</div>
+        <div class="card-sub">${data.active_listings} Propert${data.active_listings === 1 ? 'y' : 'ies'} | ${data.available_suites} Available Suite${data.available_suites === 1 ? '' : 's'}</div>
       </div>
       <div class="card">
         <div class="card-label">Pipeline Value</div>

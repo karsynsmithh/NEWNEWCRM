@@ -55,7 +55,7 @@ function renderKanban(contacts) {
             ? '<p style="font-size:12px;color:var(--text-muted);text-align:center;padding:12px 0">Empty</p>'
             : byStage[stage].map(c => `
               <div class="kanban-card" onclick="editContact(${c.id})">
-                <div class="kanban-card-name">${c.name}</div>
+                <div class="kanban-card-name">${c.name}${noteCountChip(c.note_count)}</div>
                 <div class="kanban-card-company">${c.company || '—'}</div>
                 <div class="kanban-card-meta">
                   ${c.phone ? `<span>&#128222; ${c.phone}</span>` : ''}
@@ -87,7 +87,7 @@ function renderContactList(contacts) {
               ? `<tr><td colspan="8"><div class="empty-state"><div class="empty-state-icon">&#128101;</div><div class="empty-state-text">No contacts yet.</div></div></td></tr>`
               : contacts.map(c => `
                 <tr>
-                  <td><strong>${c.name}</strong></td>
+                  <td><strong>${c.name}</strong>${noteCountChip(c.note_count)}</td>
                   <td>${c.company || '—'}</td>
                   <td>${c.contact_type || '—'}</td>
                   <td>${badge(c.pipeline_stage, STATUS_MAP)}</td>
@@ -173,7 +173,16 @@ function contactForm(c = {}) {
 }
 
 function openContactModal(c = {}) {
-  modal.open(c.id ? 'Edit Contact' : 'Add Contact', contactForm(c), async () => {
+  const html = c.id ? `
+    <div class="modal-tabs">
+      <button type="button" class="modal-tab active" data-tab="details">Details</button>
+      <button type="button" class="modal-tab" data-tab="notes">Notes</button>
+    </div>
+    <div class="modal-tab-pane" id="tab-details">${contactForm(c)}</div>
+    <div class="modal-tab-pane" id="tab-notes" style="display:none">${notesTabHtml()}</div>
+  ` : contactForm(c);
+
+  modal.open(c.id ? 'Edit Contact' : 'Add Contact', html, async () => {
     if (!requireField('name', 'Name is required')) return;
     const data = formData(['name','company','email','phone','contact_type','pipeline_stage',
       'req_size_min','req_size_max','req_budget','req_location','req_property_type',
@@ -192,6 +201,11 @@ function openContactModal(c = {}) {
       toast('Error saving contact', 'error');
     }
   });
+
+  if (c.id) {
+    initModalTabs();
+    loadNotesTab('contact_id', c.id);
+  }
 }
 
 async function editContact(id) {

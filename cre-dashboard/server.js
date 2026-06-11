@@ -73,7 +73,11 @@ app.get('/logout', (req, res) => {
 
 // ─── Uploads ──────────────────────────────────────────────────────────────────
 const uploadsDir = process.env.UPLOADS_PATH || path.join(__dirname, 'uploads');
-if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir, { recursive: true });
+try {
+  if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir, { recursive: true });
+} catch (e) {
+  console.warn('Could not create uploads dir:', e.message, '— file uploads will be disabled');
+}
 
 const multerStorage = multer.diskStorage({
   destination: (req, file, cb) => cb(null, uploadsDir),

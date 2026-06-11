@@ -79,7 +79,7 @@ function renderVendorCard(v) {
     <div class="vendor-card">
       <div class="vendor-card-header">
         <div>
-          <div class="vendor-name">${v.name}</div>
+          <div class="vendor-name"><a href="#" class="teal-link" onclick="openVendorProfile(${v.id});return false">${v.name}</a></div>
           ${v.company ? `<div class="vendor-company">${v.company}</div>` : ''}
         </div>
         <button class="star-btn ${v.preferred ? 'starred' : ''}" onclick="toggleVendorPreferred(${v.id}, ${v.preferred ? 0 : 1})" title="${v.preferred ? 'Remove preferred' : 'Mark preferred'}">
@@ -179,3 +179,39 @@ async function toggleVendorPreferred(id, newVal) {
   toast(newVal ? 'Marked as preferred' : 'Removed from preferred');
   loadVendors();
 }
+
+window.openVendorProfile = async function(id) {
+  const v = await API.get(`/api/vendors/${id}`);
+
+  const starsHtml = Array.from({length: 5}, (_, i) =>
+    `<span style="color:${i < (v.rating || 0) ? '#f59e0b' : '#e2e8f0'};font-size:20px">&#9733;</span>`
+  ).join('');
+
+  const html = `
+    <div class="profile-header">
+      <div>
+        <div style="font-size:20px;font-weight:700">${escapeHtml(v.name)}${v.preferred ? ' <span title="Preferred">&#11088;</span>' : ''}</div>
+        ${vBadge(v.vendor_type)}
+      </div>
+    </div>
+    <div class="profile-grid">
+      <div class="profile-field"><span class="profile-label">Company</span>${escapeHtml(v.company || '—')}</div>
+      <div class="profile-field"><span class="profile-label">Specialty</span>${escapeHtml(v.specialty || '—')}</div>
+      <div class="profile-field"><span class="profile-label">Email</span>${v.email ? `<a href="mailto:${escapeHtml(v.email)}" class="teal-link">${escapeHtml(v.email)}</a>` : '—'}</div>
+      <div class="profile-field"><span class="profile-label">Phone</span>${v.phone ? `<a href="tel:${escapeHtml(v.phone)}" class="teal-link">${escapeHtml(v.phone)}</a>` : '—'}</div>
+      <div class="profile-field"><span class="profile-label">Address</span>${escapeHtml(v.address || '—')}</div>
+      <div class="profile-field"><span class="profile-label">City</span>${escapeHtml(v.city || '—')}</div>
+    </div>
+    <div class="profile-section">
+      <div class="profile-section-title">Rating</div>
+      <div>${v.rating ? starsHtml : '<span style="color:var(--text-muted);font-size:13px">No rating</span>'}</div>
+    </div>
+    ${v.notes ? `<div class="profile-section"><div class="profile-section-title">Notes</div><div style="font-size:13px;color:var(--text-muted);white-space:pre-wrap">${escapeHtml(v.notes)}</div></div>` : ''}
+    <div style="margin-top:16px">
+      <button class="btn btn-secondary" onclick="modal.close();editVendor(${id})">Edit Vendor</button>
+    </div>
+  `;
+
+  modal.open('Vendor Profile', html, null);
+  document.getElementById('modal-save').style.display = 'none';
+};

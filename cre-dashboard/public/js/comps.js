@@ -100,7 +100,7 @@ function renderCompsTable(rows, tab) {
               ${rows.length === 0
                 ? `<tr><td colspan="13"><div class="empty-state"><div class="empty-state-icon">&#128202;</div><div class="empty-state-text">No lease comps yet.</div></div></td></tr>`
                 : rows.map(r => `<tr>
-                    <td><strong>${r.address}</strong>${r.city?'<br><small style="color:var(--text-muted)">'+r.city+'</small>':''}</td>
+                    <td><a href="#" class="teal-link" onclick="openLeaseCompProfile(${r.id});return false"><strong>${r.address}</strong></a>${r.city?'<br><small style="color:var(--text-muted)">'+r.city+'</small>':''}</td>
                     <td>${r.submarket || '—'}</td>
                     <td>${r.property_type || '—'}</td>
                     <td>${r.tenant_name || '—'}</td>
@@ -135,7 +135,7 @@ function renderCompsTable(rows, tab) {
               ${rows.length === 0
                 ? `<tr><td colspan="12"><div class="empty-state"><div class="empty-state-icon">&#128202;</div><div class="empty-state-text">No sale comps yet.</div></div></td></tr>`
                 : rows.map(r => `<tr>
-                    <td><strong>${r.address}</strong>${r.city?'<br><small style="color:var(--text-muted)">'+r.city+'</small>':''}</td>
+                    <td><a href="#" class="teal-link" onclick="openSaleCompProfile(${r.id});return false"><strong>${r.address}</strong></a>${r.city?'<br><small style="color:var(--text-muted)">'+r.city+'</small>':''}</td>
                     <td>${r.submarket || '—'}</td>
                     <td>${r.property_type || '—'}</td>
                     <td>${r.buyer_name || '—'}</td>
@@ -310,3 +310,91 @@ function exportCSV(rows, name) {
   a.href = url; a.download = `${name}_${today()}.csv`; a.click();
   URL.revokeObjectURL(url);
 }
+
+window.openLeaseCompProfile = async function(id) {
+  const r = await API.get(`/api/comps/leases/${id}`);
+
+  const html = `
+    <div class="profile-header">
+      <div>
+        <div style="font-size:20px;font-weight:700">${escapeHtml(r.address)}</div>
+        ${r.city ? `<div style="font-size:14px;color:var(--text-muted)">${escapeHtml(r.city)}</div>` : ''}
+      </div>
+    </div>
+    <div class="profile-grid">
+      <div class="profile-field"><span class="profile-label">Submarket</span>${escapeHtml(r.submarket || '—')}</div>
+      <div class="profile-field"><span class="profile-label">Property Type</span>${escapeHtml(r.property_type || '—')}</div>
+      <div class="profile-field"><span class="profile-label">Tenant</span>${escapeHtml(r.tenant_name || '—')}</div>
+      <div class="profile-field"><span class="profile-label">Landlord</span>${escapeHtml(r.landlord_name || '—')}</div>
+      <div class="profile-field"><span class="profile-label">Size</span>${r.size_sf ? Number(r.size_sf).toLocaleString() + ' SF' : '—'}</div>
+      <div class="profile-field"><span class="profile-label">Lease Rate</span>${r.lease_rate ? '$' + Number(r.lease_rate).toFixed(2) + '/SF/yr' : '—'}</div>
+      <div class="profile-field"><span class="profile-label">Lease Structure</span>${escapeHtml(r.lease_structure || '—')}</div>
+      <div class="profile-field"><span class="profile-label">Term</span>${r.term_months ? r.term_months + ' months' : '—'}</div>
+      <div class="profile-field"><span class="profile-label">TI Allowance</span>${r.ti_allowance ? '$' + Number(r.ti_allowance).toFixed(2) + '/SF' : '—'}</div>
+      <div class="profile-field"><span class="profile-label">Free Rent</span>${r.free_rent_months ? r.free_rent_months + ' months' : '—'}</div>
+    </div>
+    <div class="profile-section">
+      <div class="profile-section-title">Dates</div>
+      <div class="profile-grid">
+        <div class="profile-field"><span class="profile-label">Date Signed</span>${fmtDate(r.date_signed)}</div>
+        <div class="profile-field"><span class="profile-label">Lease Start</span>${fmtDate(r.lease_start_date)}</div>
+        <div class="profile-field"><span class="profile-label">Lease End</span>${fmtDate(r.lease_end_date)}</div>
+      </div>
+    </div>
+    <div class="profile-section">
+      <div class="profile-section-title">Source</div>
+      <div style="font-size:13px;color:var(--text-muted)">${escapeHtml(r.source || '—')}</div>
+    </div>
+    ${r.notes ? `<div class="profile-section"><div class="profile-section-title">Notes</div><div style="font-size:13px;color:var(--text-muted);white-space:pre-wrap">${escapeHtml(r.notes)}</div></div>` : ''}
+    <div style="margin-top:16px">
+      <button class="btn btn-secondary" onclick="modal.close();editLeaseComp(${id})">Edit Lease Comp</button>
+    </div>
+  `;
+
+  modal.open('Lease Comp Profile', html, null);
+  document.getElementById('modal-save').style.display = 'none';
+};
+
+window.openSaleCompProfile = async function(id) {
+  const r = await API.get(`/api/comps/sales/${id}`);
+
+  const html = `
+    <div class="profile-header">
+      <div>
+        <div style="font-size:20px;font-weight:700">${escapeHtml(r.address)}</div>
+        ${r.city ? `<div style="font-size:14px;color:var(--text-muted)">${escapeHtml(r.city)}</div>` : ''}
+      </div>
+    </div>
+    <div class="profile-grid">
+      <div class="profile-field"><span class="profile-label">Submarket</span>${escapeHtml(r.submarket || '—')}</div>
+      <div class="profile-field"><span class="profile-label">Property Type</span>${escapeHtml(r.property_type || '—')}</div>
+      <div class="profile-field"><span class="profile-label">Buyer</span>${escapeHtml(r.buyer_name || '—')}</div>
+      <div class="profile-field"><span class="profile-label">Seller</span>${escapeHtml(r.seller_name || '—')}</div>
+      <div class="profile-field"><span class="profile-label">Size</span>${r.size_sf ? Number(r.size_sf).toLocaleString() + ' SF' : '—'}</div>
+      <div class="profile-field"><span class="profile-label">Sale Price</span>${r.sale_price ? fmt$(r.sale_price) : '—'}</div>
+      <div class="profile-field"><span class="profile-label">Price / SF</span>${r.price_per_sf ? '$' + Number(r.price_per_sf).toFixed(0) + '/SF' : '—'}</div>
+      <div class="profile-field"><span class="profile-label">Cap Rate</span>${r.cap_rate ? Number(r.cap_rate).toFixed(2) + '%' : '—'}</div>
+      <div class="profile-field"><span class="profile-label">NOI</span>${r.noi ? fmt$(r.noi) : '—'}</div>
+      <div class="profile-field"><span class="profile-label">Year Built</span>${r.year_built || '—'}</div>
+      <div class="profile-field"><span class="profile-label">Occupancy at Sale</span>${r.occupancy_pct ? Number(r.occupancy_pct).toFixed(1) + '%' : '—'}</div>
+      ${r.land_acres ? `<div class="profile-field"><span class="profile-label">Land (acres)</span>${Number(r.land_acres).toFixed(2)}</div>` : ''}
+    </div>
+    <div class="profile-section">
+      <div class="profile-section-title">Dates</div>
+      <div class="profile-grid">
+        <div class="profile-field"><span class="profile-label">Close Date</span>${fmtDate(r.close_date)}</div>
+      </div>
+    </div>
+    <div class="profile-section">
+      <div class="profile-section-title">Source</div>
+      <div style="font-size:13px;color:var(--text-muted)">${escapeHtml(r.source || '—')}</div>
+    </div>
+    ${r.notes ? `<div class="profile-section"><div class="profile-section-title">Notes</div><div style="font-size:13px;color:var(--text-muted);white-space:pre-wrap">${escapeHtml(r.notes)}</div></div>` : ''}
+    <div style="margin-top:16px">
+      <button class="btn btn-secondary" onclick="modal.close();editSaleComp(${id})">Edit Sale Comp</button>
+    </div>
+  `;
+
+  modal.open('Sale Comp Profile', html, null);
+  document.getElementById('modal-save').style.display = 'none';
+};

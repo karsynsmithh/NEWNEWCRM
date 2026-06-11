@@ -60,7 +60,7 @@ async function loadDeals() {
               ? `<tr><td colspan="11"><div class="empty-state"><div class="empty-state-icon">&#129309;</div><div class="empty-state-text">No deals yet. Add your first deal.</div></div></td></tr>`
               : deals.map(d => `
                 <tr>
-                  <td><strong>${d.deal_name}</strong>${noteCountChip(d.note_count)}</td>
+                  <td><a href="#" class="teal-link" onclick="openDealProfile(${d.id});return false"><strong>${d.deal_name}</strong></a>${noteCountChip(d.note_count)}</td>
                   <td>${d.deal_type || '—'}</td>
                   <td style="max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${d.property_address || '—'}</td>
                   <td>${d.tenant_buyer_name || '—'}</td>
@@ -552,3 +552,92 @@ async function deleteDeal(id) {
   toast('Deal deleted');
   loadDeals();
 }
+
+window.openDealProfile = async function(id) {
+  const [d, activities] = await Promise.all([
+    API.get(`/api/deals/${id}`),
+    API.get(`/api/activities?deal_id=${id}`).catch(() => [])
+  ]);
+
+  const isLease = d.deal_type === 'lease';
+  const isSale = d.deal_type === 'sale';
+
+  const leaseSection = isLease ? `
+    <div class="profile-section">
+      <div class="profile-section-title">Lease Details</div>
+      <div class="profile-grid">
+        <div class="profile-field"><span class="profile-label">Rate</span>${d.lease_rate ? fmt$(d.lease_rate) + '/SF/yr' : '—'}</div>
+        <div class="profile-field"><span class="profile-label">Size</span>${d.size_sf ? fmtSF(d.size_sf) : '—'}</div>
+        <div class="profile-field"><span class="profile-label">Term</span>${d.term_months ? d.term_months + ' months' : '—'}</div>
+        <div class="profile-field"><span class="profile-label">TI Allowance</span>${d.ti_allowance ? fmt$(d.ti_allowance) + '/SF' : '—'}</div>
+        <div class="profile-field"><span class="profile-label">Free Rent</span>${d.free_rent_months ? d.free_rent_months + ' months' : '—'}</div>
+      </div>
+    </div>` : '';
+
+  const saleSection = isSale ? `
+    <div class="profile-section">
+      <div class="profile-section-title">Sale Details</div>
+      <div class="profile-grid">
+        <div class="profile-field"><span class="profile-label">Sale Price</span>${d.sale_price ? fmt$(d.sale_price) : '—'}</div>
+        <div class="profile-field"><span class="profile-label">NOI</span>${d.noi ? fmt$(d.noi) : '—'}</div>
+        <div class="profile-field"><span class="profile-label">Cap Rate</span>${d.cap_rate ? Number(d.cap_rate).toFixed(2) + '%' : '—'}</div>
+      </div>
+    </div>` : '';
+
+  const recentActs = activities.slice(0, 5);
+  const timelineHtml = recentActs.length === 0
+    ? '<p style="color:var(--text-muted);font-size:13px;text-align:center;padding:12px 0">No recent activities.</p>'
+    : `<div class="timeline">${recentActs.map(a => `
+        <div class="timeline-item">
+          <div class="timeline-dot"></div>
+          <div class="timeline-content">
+            <div class="timeline-meta">${typeof actBadge === 'function' ? actBadge(a.activity_type) : a.activity_type} &nbsp; ${fmtDate(a.activity_date ? a.activity_date.slice(0,10) : '')}</div>
+            <div class="timeline-summary">${escapeHtml(a.summary || '')}</div>
+            ${a.notes ? `<div class="timeline-notes">${escapeHtml(a.notes)}</div>` : ''}
+          </div>
+        </div>`).join('')}
+      </div>`;
+
+  const html = `
+    <div class="profile-header">
+      <div>
+        <div style="font-size:20px;font-weight:700">${escapeHtml(d.deal_name)}</div>
+        ${badge(d.status, STATUS_MAP)}
+      </div>
+    </div>
+    <div class="profile-grid">
+      <div class="profile-field"><span class="profile-label">Type</span>${escapeHtml(d.deal_type || '—')}</div>
+      <div class="profile-field"><span class="profile-label">Property Address</span>${escapeHtml(d.property_address || '—')}</div>
+      <div class="profile-field"><span class="profile-label">Tenant / Buyer</span>${escapeHtml(d.tenant_buyer_name || '—')}</div>
+      <div class="profile-field"><span class="profile-label">Landlord / Seller</span>${escapeHtml(d.landlord_seller_name || '—')}</div>
+    </div>
+    ${leaseSection}
+    ${saleSection}
+    <div class="profile-section">
+      <div class="profile-section-title">Key Dates</div>
+      <div class="profile-grid">
+        <div class="profile-field"><span class="profile-label">LOI Date</span>${fmtDate(d.loi_date)}</div>
+        <div class="profile-field"><span class="profile-label">Expected Close</span>${fmtDate(d.expected_close_date)}</div>
+        <div class="profile-field"><span class="profile-label">Actual Close</span>${fmtDate(d.actual_close_date)}</div>
+      </div>
+    </div>
+    <div class="profile-section">
+      <div class="profile-section-title">Commission</div>
+      <div class="profile-grid">
+        <div class="profile-field"><span class="profile-label">Amount</span>${d.total_commission ? fmt$(d.total_commission) : '—'}</div>
+        <div class="profile-field"><span class="profile-label">Status</span>${badge(d.commission_status, STATUS_MAP)}</div>
+      </div>
+    </div>
+    ${d.notes ? `<div class="profile-section"><div class="profile-section-title">Notes</div><div style="font-size:13px;color:var(--text-muted);white-space:pre-wrap">${escapeHtml(d.notes)}</div></div>` : ''}
+    <div class="profile-section">
+      <div class="profile-section-title">Recent Activities</div>
+      ${timelineHtml}
+    </div>
+    <div style="margin-top:16px">
+      <button class="btn btn-secondary" onclick="modal.close();editDeal(${id})">Edit Deal</button>
+    </div>
+  `;
+
+  modal.open('Deal Profile', html, null);
+  document.getElementById('modal-save').style.display = 'none';
+};

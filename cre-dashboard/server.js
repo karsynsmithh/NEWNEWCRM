@@ -4,14 +4,75 @@ const cors = require('cors');
 const path = require('path');
 const os = require('os');
 const fs = require('fs');
+const crypto = require('crypto');
 const multer = require('multer');
 const db = require('./database');
 
 const app = express();
-const PORT = 3000;
+const PORT = process.env.PORT || 3000;
+
+// ─── Auth ─────────────────────────────────────────────────────────────────────
+
+const AUTH_COOKIE = 'cre_auth';
+const SESSION_SECRET = process.env.SESSION_SECRET || 'dev-only-secret-change-me';
+const ADMIN_USER = process.env.ADMIN_USER || 'admin';
+const ADMIN_PASS = process.env.ADMIN_PASS || 'changeme';
+
+function signToken(value) {
+  const sig = crypto.createHmac('sha256', SESSION_SECRET).update(value).digest('base64url');
+  return `${value}.${sig}`;
+}
+
+function verifyToken(signed) {
+  if (!signed) return false;
+  const dot = signed.lastIndexOf('.');
+  if (dot === -1) return false;
+  const value = signed.slice(0, dot);
+  const sig = signed.slice(dot + 1);
+  const expected = crypto.createHmac('sha256', SESSION_SECRET).update(value).digest('base64url');
+  try {
+    return crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expected)) ? value : false;
+  } catch { return false; }
+}
+
+function getCookie(req, name) {
+  const header = req.headers.cookie || '';
+  for (const part of header.split(';')) {
+    const [k, ...v] = part.trim().split('=');
+    if (k.trim() === name) return decodeURIComponent(v.join('='));
+  }
+  return null;
+}
+
+function requireAuth(req, res, next) {
+  if (verifyToken(getCookie(req, AUTH_COOKIE))) return next();
+  if (req.path.startsWith('/api/') || req.path.startsWith('/uploads/')) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+  res.redirect('/login');
+}
+
+app.get('/login', (req, res) => res.sendFile(path.join(__dirname, 'public', 'login.html')));
+
+app.post('/api/login', express.urlencoded({ extended: false }), (req, res) => {
+  const { username, password } = req.body;
+  if (username === ADMIN_USER && password === ADMIN_PASS) {
+    const token = signToken('authenticated');
+    const maxAge = 30 * 24 * 3600;
+    const secure = req.secure || req.headers['x-forwarded-proto'] === 'https' ? '; Secure' : '';
+    res.setHeader('Set-Cookie', `${AUTH_COOKIE}=${token}; Path=/; HttpOnly; Max-Age=${maxAge}; SameSite=Lax${secure}`);
+    return res.redirect('/');
+  }
+  res.redirect('/login?error=1');
+});
+
+app.get('/logout', (req, res) => {
+  res.setHeader('Set-Cookie', `${AUTH_COOKIE}=; Path=/; HttpOnly; Max-Age=0`);
+  res.redirect('/login');
+});
 
 // ─── Uploads ──────────────────────────────────────────────────────────────────
-const uploadsDir = path.join(__dirname, 'uploads');
+const uploadsDir = process.env.UPLOADS_PATH || path.join(__dirname, 'uploads');
 if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir, { recursive: true });
 
 const multerStorage = multer.diskStorage({
@@ -50,6 +111,7 @@ if (process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET) {
 
 app.use(cors());
 app.use(express.json());
+app.use(requireAuth);
 app.use(express.static(path.join(__dirname, 'public')));
 app.use('/uploads', express.static(uploadsDir));
 

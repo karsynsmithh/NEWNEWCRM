@@ -1,7 +1,7 @@
 const { DatabaseSync } = require('node:sqlite');
 const path = require('path');
 
-const DB_PATH = path.join(__dirname, 'cre_dashboard.db');
+const DB_PATH = process.env.DB_PATH || path.join(__dirname, 'cre_dashboard.db');
 const _db = new DatabaseSync(DB_PATH);
 
 _db.exec('PRAGMA journal_mode = WAL');

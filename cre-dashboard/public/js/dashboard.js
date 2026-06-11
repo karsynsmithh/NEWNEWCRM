@@ -19,15 +19,17 @@ const ENTITY_PAGES = { property: 'properties', contact: 'contacts', deal: 'deals
 
 PAGE_LOADERS.dashboard = async function loadDashboard() {
   const el = document.getElementById('page-dashboard');
+  if (!el) return;
   el.innerHTML = '<p style="color:var(--text-muted);padding:20px">Loading...</p>';
 
+  try {
   const [data, activity, recentActivities] = await Promise.all([
-    API.get('/api/dashboard/summary').catch(() => null),
+    API.get('/api/dashboard/summary').catch(e => { console.error('summary error:', e); return null; }),
     API.get('/api/activity').catch(() => []),
     API.get('/api/activities/recent').catch(() => [])
   ]);
   if (!data) {
-    el.innerHTML = '<p style="color:var(--red);padding:20px">Failed to load dashboard.</p>';
+    el.innerHTML = '<p style="color:var(--red);padding:20px">Failed to load dashboard — check the console for details.</p>';
     return;
   }
 
@@ -182,7 +184,7 @@ PAGE_LOADERS.dashboard = async function loadDashboard() {
               onclick="navigate('${ENTITY_PAGES[a.entity_type]}')">${escapeHtml(a.entity_name)}</a>
             <span class="activity-time">${timeAgo(a.note_date)}</span>
           </div>
-          <div class="activity-text">${escapeHtml(a.note_text.length > 120 ? a.note_text.slice(0, 120) + '…' : a.note_text)}</div>
+          <div class="activity-text">${escapeHtml((a.note_text || '').length > 120 ? (a.note_text || '').slice(0, 120) + '…' : (a.note_text || ''))}</div>
         </div>
       </div>
     `).join('');
@@ -192,6 +194,11 @@ PAGE_LOADERS.dashboard = async function loadDashboard() {
   // Gmail status widget
   const gs = await API.get('/api/gmail/status').catch(() => null);
   renderGmailWidget(gs);
+
+  } catch (err) {
+    console.error('Dashboard render error:', err);
+    el.innerHTML = `<p style="color:var(--red);padding:20px">Dashboard error: ${err.message}</p>`;
+  }
 };
 
 function renderGmailWidget(s) {

@@ -5,8 +5,11 @@ let contactsList = [];
 
 async function loadDeals() {
   const el = document.getElementById('page-deals');
+  if (!el) return;
   const statusFilter = el._statusFilter || '';
   const typeFilter = el._typeFilter || '';
+
+  el.innerHTML = '<p style="color:var(--text-muted);padding:20px">Loading...</p>';
 
   let url = '/api/deals';
   const qs = [];
@@ -14,6 +17,7 @@ async function loadDeals() {
   if (typeFilter) qs.push(`deal_type=${typeFilter}`);
   if (qs.length) url += '?' + qs.join('&');
 
+  try {
   const [deals, props, contacts] = await Promise.all([
     API.get(url).catch(() => []),
     API.get('/api/properties').catch(() => []),
@@ -91,6 +95,11 @@ async function loadDeals() {
       cell.innerHTML = `<div class="doc-mini-prog">${done}/${docs.length}<div class="doc-mini-bar"><div class="doc-mini-bar-fill" style="width:${pct}%"></div></div></div>`;
     }).catch(() => {});
   });
+
+  } catch (err) {
+    console.error('Deals render error:', err);
+    el.innerHTML = `<p style="color:var(--red);padding:20px">Deals error: ${err.message}</p>`;
+  }
 }
 
 function dealForm(d = {}) {

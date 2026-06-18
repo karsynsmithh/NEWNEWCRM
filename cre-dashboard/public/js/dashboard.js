@@ -1,10 +1,35 @@
+// Time-ago helper used in activity feed
+function timeAgo(dtStr) {
+  if (!dtStr) return '';
+  const d = new Date(String(dtStr).replace(' ', 'T'));
+  if (isNaN(d)) return '';
+  const diff = Date.now() - d.getTime();
+  const mins = Math.floor(diff / 60000);
+  if (mins < 1) return 'just now';
+  if (mins < 60) return `${mins}m ago`;
+  const hrs = Math.floor(mins / 60);
+  if (hrs < 24) return `${hrs}h ago`;
+  const days = Math.floor(hrs / 24);
+  if (days < 30) return `${days}d ago`;
+  return fmtDateTime(dtStr).split(' at')[0];
+}
+
+const ENTITY_ICONS = { property: '&#127970;', contact: '&#128101;', deal: '&#129309;' };
+const ENTITY_PAGES = { property: 'properties', contact: 'contacts', deal: 'deals' };
+
 PAGE_LOADERS.dashboard = async function loadDashboard() {
   const el = document.getElementById('page-dashboard');
+  if (!el) return;
   el.innerHTML = '<p style="color:var(--text-muted);padding:20px">Loading...</p>';
 
-  const data = await API.get('/api/dashboard/summary').catch(() => null);
+  try {
+  const [data, activity, recentActivities] = await Promise.all([
+    API.get('/api/dashboard/summary').catch(e => { console.error('summary error:', e); return null; }),
+    API.get('/api/activity').catch(() => []),
+    API.get('/api/activities/recent').catch(() => [])
+  ]);
   if (!data) {
-    el.innerHTML = '<p style="color:var(--red);padding:20px">Failed to load dashboard.</p>';
+    el.innerHTML = '<p style="color:var(--red);padding:20px">Failed to load dashboard — check the console for details.</p>';
     return;
   }
 
@@ -62,6 +87,7 @@ PAGE_LOADERS.dashboard = async function loadDashboard() {
       <div class="card">
         <div class="card-label">Active Listings</div>
         <div class="card-value">${data.active_listings}</div>
+        <div class="card-sub">${data.active_listings} Propert${data.active_listings === 1 ? 'y' : 'ies'} | ${data.available_suites} Available Suite${data.available_suites === 1 ? '' : 's'}</div>
       </div>
       <div class="card">
         <div class="card-label">Pipeline Value</div>
@@ -114,10 +140,111 @@ PAGE_LOADERS.dashboard = async function loadDashboard() {
       </div>
       ${eventHtml}
     </div>
+
+    <div id="gmail-widget" class="gmail-widget" style="display:none"></div>
+
+    <div class="panels-row" style="margin-top:16px">
+      <div class="panel">
+        <div class="panel-title">Recent Activity Log</div>
+        ${recentActivities.slice(0,5).length === 0
+          ? '<p style="color:var(--text-muted);font-size:13px">No activities logged yet.</p>'
+          : recentActivities.slice(0,5).map(a => {
+              const actBadgeColors = { call:'#dbeafe|#1e40af', email:'#ede9fe|#4c1d95', meeting:'#ccfbf1|#115e59', site_tour:'#ffedd5|#9a3412', loi_sent:'#dcfce7|#14532d', loi_countered:'#dcfce7|#14532d', lease_sent:'#dcfce7|#14532d', lease_executed:'#dcfce7|#14532d', voicemail:'#f1f5f9|#64748b', text:'#f1f5f9|#64748b', other:'#f1f5f9|#64748b' };
+              const [bg, color] = (actBadgeColors[a.activity_type] || '#f1f5f9|#64748b').split('|');
+              const daysAgo = Math.floor((Date.now() - new Date(a.activity_date).getTime()) / 86400000);
+              const ago = daysAgo === 0 ? 'Today' : daysAgo === 1 ? '1d ago' : daysAgo + 'd ago';
+              return `<div class="recent-act-item">
+                <span style="background:${bg};color:${color};padding:2px 8px;border-radius:999px;font-size:11px;font-weight:600;white-space:nowrap">${(a.activity_type||'').replace(/_/g,' ')}</span>
+                <span class="recent-act-text">${a.summary}${a.contact_name ? ' — ' + a.contact_name : ''}</span>
+                <span class="recent-act-meta">${ago}</span>
+              </div>`;
+            }).join('')}
+      </div>
+      <div class="panel">
+        <div class="panel-title">Recent Notes</div>
+        <div id="activity-feed"><p style="color:var(--text-muted);font-size:13px">Loading…</p></div>
+      </div>
+    </div>
   `;
 
   document.getElementById('goal-input').addEventListener('change', e => {
     localStorage.setItem(goalKey, e.target.value);
     loadDashboard();
   });
+
+  // Activity feed
+  const activityHtml = activity.length === 0
+    ? '<p style="color:var(--text-muted);font-size:13px">No notes logged yet.</p>'
+    : activity.map(a => `
+      <div class="activity-item">
+        <span class="activity-icon">${ENTITY_ICONS[a.entity_type] || '&#128196;'}</span>
+        <div class="activity-body">
+          <div class="activity-header">
+            <a class="activity-entity" href="#${ENTITY_PAGES[a.entity_type]}"
+              onclick="navigate('${ENTITY_PAGES[a.entity_type]}')">${escapeHtml(a.entity_name)}</a>
+            <span class="activity-time">${timeAgo(a.note_date)}</span>
+          </div>
+          <div class="activity-text">${escapeHtml((a.note_text || '').length > 120 ? (a.note_text || '').slice(0, 120) + '…' : (a.note_text || ''))}</div>
+        </div>
+      </div>
+    `).join('');
+
+  document.getElementById('activity-feed').innerHTML = activityHtml;
+
+  // Gmail status widget
+  const gs = await API.get('/api/gmail/status').catch(() => null);
+  renderGmailWidget(gs);
+
+  } catch (err) {
+    console.error('Dashboard render error:', err);
+    el.innerHTML = `<p style="color:var(--red);padding:20px">Dashboard error: ${err.message}</p>`;
+  }
 };
+
+function renderGmailWidget(s) {
+  const el = document.getElementById('gmail-widget');
+  if (!el) return;
+  if (!s || !s.enabled) { el.style.display = 'none'; return; }
+  el.style.display = '';
+  if (s.connected) {
+    el.innerHTML = `
+      <div class="gmail-connected">
+        <span class="gmail-icon">&#9993;&#65039;</span>
+        <div class="gmail-info">
+          <span class="gmail-email">${escapeHtml(s.email)}</span>
+          ${s.last_sync ? `<span class="gmail-sync-time">Last sync: ${timeAgo(s.last_sync)}</span>` : ''}
+        </div>
+        <button class="btn btn-sm btn-secondary" id="gmail-sync-btn" onclick="syncGmail()">Sync Now</button>
+        <button class="btn btn-sm btn-danger" onclick="disconnectGmail()" title="Disconnect">&#10005;</button>
+      </div>
+    `;
+  } else {
+    el.innerHTML = `
+      <div class="gmail-disconnected">
+        <span class="gmail-icon">&#9993;&#65039;</span>
+        <span style="font-size:13px;color:var(--text-muted)">Connect Gmail to auto-log emails as notes</span>
+        <a href="/auth/gmail" class="btn btn-sm btn-primary">Connect Gmail</a>
+      </div>
+    `;
+  }
+}
+
+async function syncGmail() {
+  const btn = document.getElementById('gmail-sync-btn');
+  if (btn) { btn.textContent = 'Syncing…'; btn.disabled = true; }
+  try {
+    const r = await API.post('/api/gmail/sync', {});
+    toast(r.message || 'Sync complete');
+    if (r.imported > 0) PAGE_LOADERS.dashboard();
+  } catch (e) {
+    toast('Gmail sync failed', 'error');
+    if (btn) { btn.textContent = 'Sync Now'; btn.disabled = false; }
+  }
+}
+
+async function disconnectGmail() {
+  if (!confirm('Disconnect Gmail? Previously imported emails stay as notes.')) return;
+  await API.delete('/auth/gmail').catch(() => {});
+  toast('Gmail disconnected');
+  renderGmailWidget({ enabled: true, connected: false });
+}

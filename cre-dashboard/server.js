@@ -1,24 +1,165 @@
+require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const path = require('path');
 const os = require('os');
+const fs = require('fs');
+const crypto = require('crypto');
+const multer = require('multer');
 const db = require('./database');
 
 const app = express();
-const PORT = 3000;
+const PORT = process.env.PORT || 3000;
+
+// ─── Auth ─────────────────────────────────────────────────────────────────────
+
+const AUTH_COOKIE = 'cre_auth';
+const SESSION_SECRET = process.env.SESSION_SECRET || 'dev-only-secret-change-me';
+const ADMIN_USER = process.env.ADMIN_USER || 'admin';
+const ADMIN_PASS = process.env.ADMIN_PASS || 'changeme';
+
+function signToken(value) {
+  const sig = crypto.createHmac('sha256', SESSION_SECRET).update(value).digest('base64url');
+  return `${value}.${sig}`;
+}
+
+function verifyToken(signed) {
+  if (!signed) return false;
+  const dot = signed.lastIndexOf('.');
+  if (dot === -1) return false;
+  const value = signed.slice(0, dot);
+  const sig = signed.slice(dot + 1);
+  const expected = crypto.createHmac('sha256', SESSION_SECRET).update(value).digest('base64url');
+  try {
+    return crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expected)) ? value : false;
+  } catch { return false; }
+}
+
+function getCookie(req, name) {
+  const header = req.headers.cookie || '';
+  for (const part of header.split(';')) {
+    const [k, ...v] = part.trim().split('=');
+    if (k.trim() === name) return decodeURIComponent(v.join('='));
+  }
+  return null;
+}
+
+function requireAuth(req, res, next) {
+  if (verifyToken(getCookie(req, AUTH_COOKIE))) return next();
+  if (req.path.startsWith('/api/') || req.path.startsWith('/uploads/')) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+  res.redirect('/login');
+}
+
+app.get('/login', (req, res) => res.sendFile(path.join(__dirname, 'public', 'login.html')));
+
+app.post('/api/login', express.urlencoded({ extended: false }), (req, res) => {
+  const { username, password } = req.body;
+  if (username === ADMIN_USER && password === ADMIN_PASS) {
+    const token = signToken('authenticated');
+    const maxAge = 30 * 24 * 3600;
+    const secure = req.secure || req.headers['x-forwarded-proto'] === 'https' ? '; Secure' : '';
+    res.setHeader('Set-Cookie', `${AUTH_COOKIE}=${token}; Path=/; HttpOnly; Max-Age=${maxAge}; SameSite=Lax${secure}`);
+    return res.redirect('/');
+  }
+  res.redirect('/login?error=1');
+});
+
+app.get('/logout', (req, res) => {
+  res.setHeader('Set-Cookie', `${AUTH_COOKIE}=; Path=/; HttpOnly; Max-Age=0`);
+  res.redirect('/login');
+});
+
+// ─── Uploads ──────────────────────────────────────────────────────────────────
+const uploadsDir = process.env.UPLOADS_PATH || path.join(__dirname, 'uploads');
+try {
+  if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir, { recursive: true });
+} catch (e) {
+  console.warn('Could not create uploads dir:', e.message, '— file uploads will be disabled');
+}
+
+const multerStorage = multer.diskStorage({
+  destination: (req, file, cb) => cb(null, uploadsDir),
+  filename: (req, file, cb) => {
+    const safe = file.originalname.replace(/[^a-zA-Z0-9._-]/g, '_');
+    cb(null, `${Date.now()}-${safe}`);
+  }
+});
+const upload = multer({ storage: multerStorage, limits: { fileSize: 25 * 1024 * 1024 } });
+
+// ─── Gmail OAuth Client ───────────────────────────────────────────────────────
+let oauth2Client = null;
+let gmailEnabled = false;
+
+if (process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET) {
+  try {
+    const { google } = require('googleapis');
+    oauth2Client = new google.auth.OAuth2(
+      process.env.GOOGLE_CLIENT_ID,
+      process.env.GOOGLE_CLIENT_SECRET,
+      process.env.GOOGLE_REDIRECT_URI || 'http://localhost:3000/auth/gmail/callback'
+    );
+    oauth2Client.on('tokens', tokens => {
+      if (tokens.access_token) {
+        db.prepare(`UPDATE gmail_tokens SET access_token=?, expiry_date=?, updated_at=CURRENT_TIMESTAMP
+          WHERE id=(SELECT id FROM gmail_tokens LIMIT 1)`)
+          .run(tokens.access_token, tokens.expiry_date);
+      }
+    });
+    gmailEnabled = true;
+  } catch (e) {
+    console.warn('  Gmail integration: googleapis not available —', e.message);
+  }
+}
 
 app.use(cors());
 app.use(express.json());
+app.use(requireAuth);
 app.use(express.static(path.join(__dirname, 'public')));
+app.use('/uploads', express.static(uploadsDir));
+
+// ─── CSV Helper ───────────────────────────────────────────────────────────────
+
+function toCSV(rows, columns) {
+  const esc = v => {
+    if (v == null) return '';
+    const s = String(v);
+    return (s.includes(',') || s.includes('"') || s.includes('\n'))
+      ? '"' + s.replace(/"/g, '""') + '"' : s;
+  };
+  return [columns.map(c => esc(c.label)), ...rows.map(r => columns.map(c => esc(r[c.key])))].map(row => row.join(',')).join('\n');
+}
 
 // ─── Properties ───────────────────────────────────────────────────────────────
 
+app.get('/api/properties/export.csv', (req, res) => {
+  const rows = db.prepare('SELECT * FROM properties ORDER BY created_at DESC').all();
+  res.setHeader('Content-Type', 'text/csv');
+  res.setHeader('Content-Disposition', 'attachment; filename="properties.csv"');
+  res.send(toCSV(rows, [
+    { key: 'id', label: 'ID' }, { key: 'address', label: 'Address' },
+    { key: 'city', label: 'City' }, { key: 'state', label: 'State' },
+    { key: 'property_type', label: 'Type' }, { key: 'size_sf', label: 'Size SF' },
+    { key: 'asking_rate', label: 'Rate $/SF/yr' }, { key: 'asking_price', label: 'Asking Price' },
+    { key: 'rep_type', label: 'Rep Type' }, { key: 'status', label: 'Status' },
+    { key: 'owner_name', label: 'Owner' }, { key: 'owner_phone', label: 'Owner Phone' },
+    { key: 'owner_email', label: 'Owner Email' }, { key: 'year_built', label: 'Year Built' },
+    { key: 'notes', label: 'Notes' }, { key: 'created_at', label: 'Created' }
+  ]));
+});
+
 app.get('/api/properties', (req, res) => {
   const { status } = req.query;
-  let sql = 'SELECT * FROM properties';
+  let sql = `
+    SELECT p.*,
+      (SELECT COUNT(*) FROM property_suites s WHERE s.property_id = p.id) AS suite_count,
+      (SELECT COUNT(*) FROM property_suites s WHERE s.property_id = p.id AND s.status = 'available') AS available_suite_count,
+      (SELECT COUNT(*) FROM notes n WHERE n.property_id = p.id) AS note_count
+    FROM properties p`;
   const params = [];
-  if (status) { sql += ' WHERE status = ?'; params.push(status); }
-  sql += ' ORDER BY created_at DESC';
+  if (status) { sql += ' WHERE p.status = ?'; params.push(status); }
+  sql += ' ORDER BY p.created_at DESC';
   res.json(db.prepare(sql).all(...params));
 });
 
@@ -65,7 +206,70 @@ app.delete('/api/properties/:id', (req, res) => {
   res.json({ success: true });
 });
 
+// ─── Property Suites ──────────────────────────────────────────────────────────
+
+app.get('/api/properties/:id/suites', (req, res) => {
+  const rows = db.prepare(
+    'SELECT * FROM property_suites WHERE property_id = ? ORDER BY suite_name ASC'
+  ).all(req.params.id);
+  res.json(rows);
+});
+
+app.post('/api/properties/:id/suites', (req, res) => {
+  const property = db.prepare('SELECT id FROM properties WHERE id = ?').get(req.params.id);
+  if (!property) return res.status(404).json({ error: 'Property not found' });
+
+  const { suite_name, size_sf, asking_rate, asking_price, status, floor, notes } = req.body;
+  if (!suite_name) return res.status(400).json({ error: 'Suite name is required' });
+
+  const result = db.prepare(`
+    INSERT INTO property_suites (property_id, suite_name, size_sf, asking_rate, asking_price, status, floor, notes)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(req.params.id, suite_name, size_sf, asking_rate, asking_price, status || 'available', floor, notes);
+
+  res.status(201).json(db.prepare('SELECT * FROM property_suites WHERE id = ?').get(result.lastInsertRowid));
+});
+
+app.put('/api/properties/:id/suites/:sid', (req, res) => {
+  const { suite_name, size_sf, asking_rate, asking_price, status, floor, notes } = req.body;
+  if (!suite_name) return res.status(400).json({ error: 'Suite name is required' });
+
+  const result = db.prepare(`
+    UPDATE property_suites SET suite_name=?, size_sf=?, asking_rate=?, asking_price=?,
+      status=?, floor=?, notes=?, updated_at=CURRENT_TIMESTAMP
+    WHERE id=? AND property_id=?
+  `).run(suite_name, size_sf, asking_rate, asking_price, status || 'available', floor, notes,
+    req.params.sid, req.params.id);
+
+  if (result.changes === 0) return res.status(404).json({ error: 'Not found' });
+  res.json(db.prepare('SELECT * FROM property_suites WHERE id = ?').get(req.params.sid));
+});
+
+app.delete('/api/properties/:id/suites/:sid', (req, res) => {
+  const result = db.prepare('DELETE FROM property_suites WHERE id = ? AND property_id = ?')
+    .run(req.params.sid, req.params.id);
+  if (result.changes === 0) return res.status(404).json({ error: 'Not found' });
+  res.json({ success: true });
+});
+
 // ─── Contacts ─────────────────────────────────────────────────────────────────
+
+app.get('/api/contacts/export.csv', (req, res) => {
+  const rows = db.prepare('SELECT * FROM contacts ORDER BY created_at DESC').all();
+  res.setHeader('Content-Type', 'text/csv');
+  res.setHeader('Content-Disposition', 'attachment; filename="contacts.csv"');
+  res.send(toCSV(rows, [
+    { key: 'id', label: 'ID' }, { key: 'name', label: 'Name' },
+    { key: 'company', label: 'Company' }, { key: 'email', label: 'Email' },
+    { key: 'phone', label: 'Phone' }, { key: 'contact_type', label: 'Type' },
+    { key: 'pipeline_stage', label: 'Stage' },
+    { key: 'req_size_min', label: 'Req SF Min' }, { key: 'req_size_max', label: 'Req SF Max' },
+    { key: 'req_budget', label: 'Budget' }, { key: 'req_location', label: 'Location' },
+    { key: 'req_property_type', label: 'Prop Type Pref' },
+    { key: 'next_followup_date', label: 'Next Follow-up' },
+    { key: 'notes', label: 'Notes' }, { key: 'created_at', label: 'Created' }
+  ]));
+});
 
 app.get('/api/contacts', (req, res) => {
   const { stage, type } = req.query;
@@ -73,7 +277,10 @@ app.get('/api/contacts', (req, res) => {
   const params = [];
   if (stage) { conditions.push('pipeline_stage = ?'); params.push(stage); }
   if (type) { conditions.push('contact_type = ?'); params.push(type); }
-  let sql = 'SELECT * FROM contacts';
+  let sql = `
+    SELECT contacts.*,
+      (SELECT COUNT(*) FROM notes n WHERE n.contact_id = contacts.id) AS note_count
+    FROM contacts`;
   if (conditions.length) sql += ' WHERE ' + conditions.join(' AND ');
   sql += ' ORDER BY created_at DESC';
   res.json(db.prepare(sql).all(...params));
@@ -156,6 +363,32 @@ app.delete('/api/contacts/:id', (req, res) => {
 
 // ─── Deals ────────────────────────────────────────────────────────────────────
 
+app.get('/api/deals/export.csv', (req, res) => {
+  const rows = db.prepare(`
+    SELECT d.*, p.address as property_address, c1.name as tenant_buyer_name, c2.name as landlord_seller_name
+    FROM deals d
+    LEFT JOIN properties p ON d.property_id = p.id
+    LEFT JOIN contacts c1 ON d.tenant_buyer_id = c1.id
+    LEFT JOIN contacts c2 ON d.landlord_seller_id = c2.id
+    ORDER BY d.created_at DESC
+  `).all();
+  res.setHeader('Content-Type', 'text/csv');
+  res.setHeader('Content-Disposition', 'attachment; filename="deals.csv"');
+  res.send(toCSV(rows, [
+    { key: 'id', label: 'ID' }, { key: 'deal_name', label: 'Deal Name' },
+    { key: 'deal_type', label: 'Type' }, { key: 'property_address', label: 'Property' },
+    { key: 'tenant_buyer_name', label: 'Tenant/Buyer' }, { key: 'landlord_seller_name', label: 'Landlord/Seller' },
+    { key: 'status', label: 'Status' }, { key: 'lease_rate', label: 'Lease Rate' },
+    { key: 'size_sf', label: 'Size SF' }, { key: 'term_months', label: 'Term (mo)' },
+    { key: 'ti_allowance', label: 'TI $/SF' }, { key: 'free_rent_months', label: 'Free Rent (mo)' },
+    { key: 'sale_price', label: 'Sale Price' }, { key: 'noi', label: 'NOI' },
+    { key: 'cap_rate', label: 'Cap Rate' }, { key: 'loi_date', label: 'LOI Date' },
+    { key: 'expected_close_date', label: 'Exp Close' }, { key: 'actual_close_date', label: 'Actual Close' },
+    { key: 'total_commission', label: 'Commission' }, { key: 'commission_status', label: 'Comm Status' },
+    { key: 'notes', label: 'Notes' }, { key: 'created_at', label: 'Created' }
+  ]));
+});
+
 app.get('/api/deals', (req, res) => {
   const { status, deal_type } = req.query;
   const conditions = [];
@@ -166,7 +399,8 @@ app.get('/api/deals', (req, res) => {
     SELECT d.*,
       p.address as property_address,
       c1.name as tenant_buyer_name,
-      c2.name as landlord_seller_name
+      c2.name as landlord_seller_name,
+      (SELECT COUNT(*) FROM notes n WHERE n.deal_id = d.id) AS note_count
     FROM deals d
     LEFT JOIN properties p ON d.property_id = p.id
     LEFT JOIN contacts c1 ON d.tenant_buyer_id = c1.id
@@ -217,7 +451,42 @@ app.post('/api/deals', (req, res) => {
     loi_date, expected_close_date, actual_close_date,
     total_commission, commission_status || 'pending', notes);
 
-  res.status(201).json(db.prepare('SELECT * FROM deals WHERE id = ?').get(result.lastInsertRowid));
+  const dealId = result.lastInsertRowid;
+
+  const leaseDocs = [
+    'NDA / Confidentiality Agreement',
+    'Letter of Intent (LOI) — Draft',
+    'Letter of Intent (LOI) — Executed',
+    'Lease Draft — Landlord Version',
+    'Lease Draft — Tenant Redlines',
+    'Lease — Final Executed',
+    'Certificate of Insurance',
+    'Personal Guarantee (if applicable)',
+    'Commission Agreement',
+    'Commission Invoice Sent',
+    'Commission — Received'
+  ];
+  const saleDocs = [
+    'NDA / Confidentiality Agreement',
+    'Letter of Intent (LOI) — Draft',
+    'Letter of Intent (LOI) — Executed',
+    'Purchase & Sale Agreement — Draft',
+    'Purchase & Sale Agreement — Executed',
+    'Due Diligence Checklist Sent',
+    'Inspection Reports Received',
+    'Title Commitment Received',
+    'Loan Commitment (if applicable)',
+    'Closing Statement',
+    'Commission Agreement',
+    'Commission Invoice Sent',
+    'Commission — Received'
+  ];
+
+  const docList = deal_type === 'sale' ? saleDocs : leaseDocs;
+  const insertDoc = db.prepare('INSERT INTO deal_documents (deal_id, doc_name, sort_order) VALUES (?, ?, ?)');
+  docList.forEach((name, i) => insertDoc.run(dealId, name, i));
+
+  res.status(201).json(db.prepare('SELECT * FROM deals WHERE id = ?').get(dealId));
 });
 
 app.put('/api/deals/:id', (req, res) => {
@@ -316,6 +585,199 @@ app.delete('/api/followups/:id', (req, res) => {
   res.json({ success: true });
 });
 
+// ─── Attachments ─────────────────────────────────────────────────────────────
+
+app.get('/api/attachments', (req, res) => {
+  const { property_id, deal_id } = req.query;
+  let field, value;
+  if (property_id) { field = 'property_id'; value = property_id; }
+  else if (deal_id) { field = 'deal_id'; value = deal_id; }
+  else return res.status(400).json({ error: 'property_id or deal_id is required' });
+  res.json(db.prepare(`SELECT * FROM attachments WHERE ${field} = ? ORDER BY created_at DESC`).all(value));
+});
+
+app.post('/api/attachments', upload.single('file'), (req, res) => {
+  if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
+  const { property_id, deal_id } = req.body;
+  if (!property_id && !deal_id) {
+    fs.unlinkSync(req.file.path);
+    return res.status(400).json({ error: 'property_id or deal_id is required' });
+  }
+  const result = db.prepare(`
+    INSERT INTO attachments (property_id, deal_id, original_name, stored_name, mime_type, size_bytes)
+    VALUES (?, ?, ?, ?, ?, ?)
+  `).run(property_id || null, deal_id || null, req.file.originalname, req.file.filename, req.file.mimetype, req.file.size);
+  res.status(201).json(db.prepare('SELECT * FROM attachments WHERE id = ?').get(result.lastInsertRowid));
+});
+
+app.delete('/api/attachments/:id', (req, res) => {
+  const a = db.prepare('SELECT * FROM attachments WHERE id = ?').get(req.params.id);
+  if (!a) return res.status(404).json({ error: 'Not found' });
+  try { fs.unlinkSync(path.join(uploadsDir, a.stored_name)); } catch (e) { /* already gone */ }
+  db.prepare('DELETE FROM attachments WHERE id = ?').run(req.params.id);
+  res.json({ success: true });
+});
+
+// ─── Activity Feed ────────────────────────────────────────────────────────────
+
+app.get('/api/activity', (req, res) => {
+  const rows = db.prepare(`
+    SELECT n.id AS note_id, n.note_text, n.note_date, p.address AS entity_name, 'property' AS entity_type, p.id AS entity_id
+    FROM notes n JOIN properties p ON n.property_id = p.id
+    UNION ALL
+    SELECT n.id AS note_id, n.note_text, n.note_date, c.name AS entity_name, 'contact' AS entity_type, c.id AS entity_id
+    FROM notes n JOIN contacts c ON n.contact_id = c.id
+    UNION ALL
+    SELECT n.id AS note_id, n.note_text, n.note_date, d.deal_name AS entity_name, 'deal' AS entity_type, d.id AS entity_id
+    FROM notes n JOIN deals d ON n.deal_id = d.id
+    ORDER BY note_date DESC, note_id DESC
+    LIMIT 30
+  `).all();
+  res.json(rows);
+});
+
+// ─── Gmail Integration ────────────────────────────────────────────────────────
+
+app.get('/api/gmail/status', (req, res) => {
+  const config = db.prepare('SELECT gmail_email, last_sync FROM gmail_tokens LIMIT 1').get();
+  res.json({ enabled: gmailEnabled, connected: !!config, email: config?.gmail_email || null, last_sync: config?.last_sync || null });
+});
+
+app.get('/auth/gmail', (req, res) => {
+  if (!gmailEnabled) return res.status(503).send('Gmail not configured — add GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET to .env');
+  const url = oauth2Client.generateAuthUrl({
+    access_type: 'offline',
+    scope: ['https://www.googleapis.com/auth/gmail.readonly'],
+    prompt: 'consent'
+  });
+  res.redirect(url);
+});
+
+app.get('/auth/gmail/callback', async (req, res) => {
+  if (!gmailEnabled) return res.redirect('/?gmail=error');
+  try {
+    const { google } = require('googleapis');
+    const { tokens } = await oauth2Client.getToken(req.query.code);
+    oauth2Client.setCredentials(tokens);
+    const gmail = google.gmail({ version: 'v1', auth: oauth2Client });
+    const profile = await gmail.users.getProfile({ userId: 'me' });
+    const existing = db.prepare('SELECT id FROM gmail_tokens LIMIT 1').get();
+    if (existing) {
+      db.prepare(`UPDATE gmail_tokens SET access_token=?, refresh_token=?, expiry_date=?, gmail_email=?, updated_at=CURRENT_TIMESTAMP WHERE id=?`)
+        .run(tokens.access_token, tokens.refresh_token || null, tokens.expiry_date || null, profile.data.emailAddress, existing.id);
+    } else {
+      db.prepare(`INSERT INTO gmail_tokens (access_token, refresh_token, expiry_date, gmail_email) VALUES (?,?,?,?)`)
+        .run(tokens.access_token, tokens.refresh_token || null, tokens.expiry_date || null, profile.data.emailAddress);
+    }
+    res.redirect('/?gmail=connected');
+  } catch (e) {
+    console.error('Gmail OAuth error:', e.message);
+    res.redirect('/?gmail=error');
+  }
+});
+
+app.post('/api/gmail/sync', async (req, res) => {
+  if (!gmailEnabled) return res.status(503).json({ error: 'Gmail not configured' });
+  const config = db.prepare('SELECT * FROM gmail_tokens LIMIT 1').get();
+  if (!config) return res.status(400).json({ error: 'Gmail not connected. Connect first via /auth/gmail' });
+
+  const { google } = require('googleapis');
+  oauth2Client.setCredentials({ access_token: config.access_token, refresh_token: config.refresh_token, expiry_date: config.expiry_date });
+  const gmail = google.gmail({ version: 'v1', auth: oauth2Client });
+
+  const contacts = db.prepare(`SELECT id, name, email FROM contacts WHERE email IS NOT NULL AND trim(email) != ''`).all();
+  let imported = 0;
+
+  for (const contact of contacts) {
+    try {
+      const listResp = await gmail.users.messages.list({
+        userId: 'me',
+        q: `from:${contact.email} OR to:${contact.email}`,
+        maxResults: 20
+      });
+      for (const msg of (listResp.data.messages || [])) {
+        if (db.prepare('SELECT id FROM email_imports WHERE gmail_message_id = ?').get(msg.id)) continue;
+        const detail = await gmail.users.messages.get({
+          userId: 'me', id: msg.id, format: 'metadata',
+          metadataHeaders: ['Subject', 'From', 'To', 'Date']
+        });
+        const hdrs = detail.data.payload?.headers || [];
+        const subject = hdrs.find(h => h.name === 'Subject')?.value || '(no subject)';
+        const from = hdrs.find(h => h.name === 'From')?.value || '';
+        const dateStr = hdrs.find(h => h.name === 'Date')?.value;
+        const noteDate = dateStr ? new Date(dateStr).toISOString().replace('T', ' ').slice(0, 19) : null;
+        const noteText = `✉️ ${subject}\nFrom: ${from}`;
+        const noteResult = db.prepare(
+          `INSERT INTO notes (note_text, note_date, contact_id) VALUES (?, COALESCE(?, CURRENT_TIMESTAMP), ?)`
+        ).run(noteText, noteDate, contact.id);
+        db.prepare('INSERT INTO email_imports (gmail_message_id, note_id) VALUES (?, ?)').run(msg.id, noteResult.lastInsertRowid);
+        imported++;
+      }
+    } catch (e) {
+      console.error(`Gmail sync contact ${contact.id}:`, e.message);
+    }
+  }
+
+  db.prepare('UPDATE gmail_tokens SET last_sync=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP WHERE id=?').run(config.id);
+  res.json({ imported, message: `Imported ${imported} new email${imported === 1 ? '' : 's'}` });
+});
+
+app.delete('/auth/gmail', (req, res) => {
+  db.prepare('DELETE FROM gmail_tokens').run();
+  res.json({ success: true });
+});
+
+// ─── Notes ────────────────────────────────────────────────────────────────────
+
+app.get('/api/notes', (req, res) => {
+  const { property_id, contact_id, deal_id } = req.query;
+  let field, value;
+  if (property_id) { field = 'property_id'; value = property_id; }
+  else if (contact_id) { field = 'contact_id'; value = contact_id; }
+  else if (deal_id) { field = 'deal_id'; value = deal_id; }
+  else return res.status(400).json({ error: 'property_id, contact_id, or deal_id is required' });
+
+  const rows = db.prepare(
+    `SELECT * FROM notes WHERE ${field} = ? ORDER BY note_date DESC, id DESC`
+  ).all(value);
+  res.json(rows);
+});
+
+app.post('/api/notes', (req, res) => {
+  const { note_text, note_date, property_id, contact_id, deal_id } = req.body;
+  if (!note_text || !note_text.trim()) return res.status(400).json({ error: 'Note text is required' });
+
+  const linked = [property_id, contact_id, deal_id].filter(v => v != null && v !== '');
+  if (linked.length !== 1) {
+    return res.status(400).json({ error: 'Exactly one of property_id, contact_id, or deal_id is required' });
+  }
+
+  const result = db.prepare(`
+    INSERT INTO notes (note_text, note_date, property_id, contact_id, deal_id)
+    VALUES (?, COALESCE(?, CURRENT_TIMESTAMP), ?, ?, ?)
+  `).run(note_text.trim(), note_date || null, property_id || null, contact_id || null, deal_id || null);
+
+  res.status(201).json(db.prepare('SELECT * FROM notes WHERE id = ?').get(result.lastInsertRowid));
+});
+
+app.put('/api/notes/:id', (req, res) => {
+  const { note_text, note_date } = req.body;
+  if (!note_text || !note_text.trim()) return res.status(400).json({ error: 'Note text is required' });
+
+  const existing = db.prepare('SELECT * FROM notes WHERE id = ?').get(req.params.id);
+  if (!existing) return res.status(404).json({ error: 'Not found' });
+
+  db.prepare('UPDATE notes SET note_text = ?, note_date = COALESCE(?, note_date) WHERE id = ?')
+    .run(note_text.trim(), note_date || null, req.params.id);
+  res.json(db.prepare('SELECT * FROM notes WHERE id = ?').get(req.params.id));
+});
+
+app.delete('/api/notes/:id', (req, res) => {
+  const result = db.prepare('DELETE FROM notes WHERE id = ?').run(req.params.id);
+  if (result.changes === 0) return res.status(404).json({ error: 'Not found' });
+  res.json({ success: true });
+});
+
 // ─── Dashboard Summary ────────────────────────────────────────────────────────
 
 app.get('/api/dashboard/summary', (req, res) => {
@@ -327,6 +789,10 @@ app.get('/api/dashboard/summary', (req, res) => {
 
   const active_listings = db.prepare(
     "SELECT COUNT(*) as c FROM properties WHERE status = 'active'"
+  ).get().c;
+
+  const available_suites = db.prepare(
+    "SELECT COUNT(*) as c FROM property_suites WHERE status = 'available'"
   ).get().c;
 
   const pipeline_value = db.prepare(
@@ -381,6 +847,7 @@ app.get('/api/dashboard/summary', (req, res) => {
 
   res.json({
     active_listings,
+    available_suites,
     pipeline_value,
     deals_closing_soon,
     followups_due_today,
@@ -390,6 +857,338 @@ app.get('/api/dashboard/summary', (req, res) => {
     pipeline_by_stage,
     upcoming_events
   });
+});
+
+// ─── Activities ──────────────────────────────────────────────────────────────
+
+app.get('/api/activities/recent', (req, res) => {
+  const rows = db.prepare(`
+    SELECT a.*, c.name as contact_name, d.deal_name, p.address as property_address
+    FROM activities a
+    LEFT JOIN contacts c ON a.contact_id = c.id
+    LEFT JOIN deals d ON a.deal_id = d.id
+    LEFT JOIN properties p ON a.property_id = p.id
+    ORDER BY a.activity_date DESC LIMIT 20
+  `).all();
+  res.json(rows);
+});
+
+app.get('/api/activities', (req, res) => {
+  const { contact_id, deal_id, property_id } = req.query;
+  const conditions = [];
+  const params = [];
+  if (contact_id) { conditions.push('a.contact_id = ?'); params.push(contact_id); }
+  if (deal_id) { conditions.push('a.deal_id = ?'); params.push(deal_id); }
+  if (property_id) { conditions.push('a.property_id = ?'); params.push(property_id); }
+  let sql = `
+    SELECT a.*, c.name as contact_name, d.deal_name, p.address as property_address
+    FROM activities a
+    LEFT JOIN contacts c ON a.contact_id = c.id
+    LEFT JOIN deals d ON a.deal_id = d.id
+    LEFT JOIN properties p ON a.property_id = p.id
+  `;
+  if (conditions.length) sql += ' WHERE ' + conditions.join(' AND ');
+  sql += ' ORDER BY a.activity_date DESC';
+  res.json(db.prepare(sql).all(...params));
+});
+
+app.get('/api/activities/:id', (req, res) => {
+  const row = db.prepare(`
+    SELECT a.*, c.name as contact_name, d.deal_name, p.address as property_address
+    FROM activities a
+    LEFT JOIN contacts c ON a.contact_id = c.id
+    LEFT JOIN deals d ON a.deal_id = d.id
+    LEFT JOIN properties p ON a.property_id = p.id
+    WHERE a.id = ?
+  `).get(req.params.id);
+  if (!row) return res.status(404).json({ error: 'Not found' });
+  res.json(row);
+});
+
+app.post('/api/activities', (req, res) => {
+  const { activity_type, summary, notes, activity_date, duration_minutes, contact_id, deal_id, property_id } = req.body;
+  if (!activity_type) return res.status(400).json({ error: 'Activity type is required' });
+  if (!summary) return res.status(400).json({ error: 'Summary is required' });
+  if (!activity_date) return res.status(400).json({ error: 'Activity date is required' });
+  const result = db.prepare(`
+    INSERT INTO activities (activity_type, summary, notes, activity_date, duration_minutes, contact_id, deal_id, property_id)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(activity_type, summary, notes, activity_date, duration_minutes, contact_id || null, deal_id || null, property_id || null);
+  res.status(201).json(db.prepare('SELECT * FROM activities WHERE id = ?').get(result.lastInsertRowid));
+});
+
+app.put('/api/activities/:id', (req, res) => {
+  const { activity_type, summary, notes, activity_date, duration_minutes, contact_id, deal_id, property_id } = req.body;
+  const result = db.prepare(`
+    UPDATE activities SET activity_type=?, summary=?, notes=?, activity_date=?, duration_minutes=?,
+      contact_id=?, deal_id=?, property_id=?
+    WHERE id=?
+  `).run(activity_type, summary, notes, activity_date, duration_minutes,
+    contact_id || null, deal_id || null, property_id || null, req.params.id);
+  if (result.changes === 0) return res.status(404).json({ error: 'Not found' });
+  res.json(db.prepare('SELECT * FROM activities WHERE id = ?').get(req.params.id));
+});
+
+app.delete('/api/activities/:id', (req, res) => {
+  const result = db.prepare('DELETE FROM activities WHERE id = ?').run(req.params.id);
+  if (result.changes === 0) return res.status(404).json({ error: 'Not found' });
+  res.json({ success: true });
+});
+
+// ─── Comps ────────────────────────────────────────────────────────────────────
+
+app.get('/api/comps/summary', (req, res) => {
+  const avg_lease_rate_by_type = db.prepare(`
+    SELECT property_type, AVG(lease_rate) as avg_rate, COUNT(*) as count
+    FROM lease_comps WHERE lease_rate IS NOT NULL GROUP BY property_type
+  `).all();
+  const avg_sale_price_psf_by_type = db.prepare(`
+    SELECT property_type, AVG(price_per_sf) as avg_price_psf, AVG(cap_rate) as avg_cap_rate, COUNT(*) as count
+    FROM sale_comps WHERE price_per_sf IS NOT NULL GROUP BY property_type
+  `).all();
+  const recent_leases = db.prepare(`SELECT * FROM lease_comps ORDER BY date_signed DESC LIMIT 5`).all();
+  const recent_sales = db.prepare(`SELECT * FROM sale_comps ORDER BY close_date DESC LIMIT 5`).all();
+  res.json({ avg_lease_rate_by_type, avg_sale_price_psf_by_type, recent_leases, recent_sales });
+});
+
+app.get('/api/comps/leases', (req, res) => {
+  const { property_type, submarket } = req.query;
+  const conditions = [];
+  const params = [];
+  if (property_type) { conditions.push('property_type = ?'); params.push(property_type); }
+  if (submarket) { conditions.push('submarket LIKE ?'); params.push(`%${submarket}%`); }
+  let sql = 'SELECT * FROM lease_comps';
+  if (conditions.length) sql += ' WHERE ' + conditions.join(' AND ');
+  sql += ' ORDER BY date_signed DESC, created_at DESC';
+  res.json(db.prepare(sql).all(...params));
+});
+
+app.get('/api/comps/leases/:id', (req, res) => {
+  const row = db.prepare('SELECT * FROM lease_comps WHERE id = ?').get(req.params.id);
+  if (!row) return res.status(404).json({ error: 'Not found' });
+  res.json(row);
+});
+
+app.post('/api/comps/leases', (req, res) => {
+  const { address, city, submarket, property_type, tenant_name, landlord_name, size_sf,
+    lease_rate, lease_structure, term_months, ti_allowance, free_rent_months,
+    lease_start_date, lease_end_date, date_signed, source, notes } = req.body;
+  if (!address) return res.status(400).json({ error: 'Address is required' });
+  const result = db.prepare(`
+    INSERT INTO lease_comps (address, city, submarket, property_type, tenant_name, landlord_name,
+      size_sf, lease_rate, lease_structure, term_months, ti_allowance, free_rent_months,
+      lease_start_date, lease_end_date, date_signed, source, notes)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(address, city, submarket, property_type, tenant_name, landlord_name,
+    size_sf, lease_rate, lease_structure, term_months, ti_allowance, free_rent_months,
+    lease_start_date, lease_end_date, date_signed, source, notes);
+  res.status(201).json(db.prepare('SELECT * FROM lease_comps WHERE id = ?').get(result.lastInsertRowid));
+});
+
+app.put('/api/comps/leases/:id', (req, res) => {
+  const { address, city, submarket, property_type, tenant_name, landlord_name, size_sf,
+    lease_rate, lease_structure, term_months, ti_allowance, free_rent_months,
+    lease_start_date, lease_end_date, date_signed, source, notes } = req.body;
+  const result = db.prepare(`
+    UPDATE lease_comps SET address=?, city=?, submarket=?, property_type=?, tenant_name=?, landlord_name=?,
+      size_sf=?, lease_rate=?, lease_structure=?, term_months=?, ti_allowance=?, free_rent_months=?,
+      lease_start_date=?, lease_end_date=?, date_signed=?, source=?, notes=?,
+      updated_at=CURRENT_TIMESTAMP
+    WHERE id=?
+  `).run(address, city, submarket, property_type, tenant_name, landlord_name,
+    size_sf, lease_rate, lease_structure, term_months, ti_allowance, free_rent_months,
+    lease_start_date, lease_end_date, date_signed, source, notes, req.params.id);
+  if (result.changes === 0) return res.status(404).json({ error: 'Not found' });
+  res.json(db.prepare('SELECT * FROM lease_comps WHERE id = ?').get(req.params.id));
+});
+
+app.delete('/api/comps/leases/:id', (req, res) => {
+  const result = db.prepare('DELETE FROM lease_comps WHERE id = ?').run(req.params.id);
+  if (result.changes === 0) return res.status(404).json({ error: 'Not found' });
+  res.json({ success: true });
+});
+
+app.get('/api/comps/sales', (req, res) => {
+  const { property_type, submarket } = req.query;
+  const conditions = [];
+  const params = [];
+  if (property_type) { conditions.push('property_type = ?'); params.push(property_type); }
+  if (submarket) { conditions.push('submarket LIKE ?'); params.push(`%${submarket}%`); }
+  let sql = 'SELECT * FROM sale_comps';
+  if (conditions.length) sql += ' WHERE ' + conditions.join(' AND ');
+  sql += ' ORDER BY close_date DESC, created_at DESC';
+  res.json(db.prepare(sql).all(...params));
+});
+
+app.get('/api/comps/sales/:id', (req, res) => {
+  const row = db.prepare('SELECT * FROM sale_comps WHERE id = ?').get(req.params.id);
+  if (!row) return res.status(404).json({ error: 'Not found' });
+  res.json(row);
+});
+
+app.post('/api/comps/sales', (req, res) => {
+  const { address, city, submarket, property_type, buyer_name, seller_name,
+    size_sf, land_acres, sale_price, noi, cap_rate, year_built, occupancy_pct,
+    close_date, source, notes } = req.body;
+  if (!address) return res.status(400).json({ error: 'Address is required' });
+  const price_per_sf = (sale_price && size_sf && size_sf > 0) ? sale_price / size_sf : null;
+  const result = db.prepare(`
+    INSERT INTO sale_comps (address, city, submarket, property_type, buyer_name, seller_name,
+      size_sf, land_acres, sale_price, price_per_sf, noi, cap_rate, year_built, occupancy_pct,
+      close_date, source, notes)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(address, city, submarket, property_type, buyer_name, seller_name,
+    size_sf, land_acres, sale_price, price_per_sf, noi, cap_rate, year_built, occupancy_pct,
+    close_date, source, notes);
+  res.status(201).json(db.prepare('SELECT * FROM sale_comps WHERE id = ?').get(result.lastInsertRowid));
+});
+
+app.put('/api/comps/sales/:id', (req, res) => {
+  const { address, city, submarket, property_type, buyer_name, seller_name,
+    size_sf, land_acres, sale_price, noi, cap_rate, year_built, occupancy_pct,
+    close_date, source, notes } = req.body;
+  const price_per_sf = (sale_price && size_sf && size_sf > 0) ? sale_price / size_sf : null;
+  const result = db.prepare(`
+    UPDATE sale_comps SET address=?, city=?, submarket=?, property_type=?, buyer_name=?, seller_name=?,
+      size_sf=?, land_acres=?, sale_price=?, price_per_sf=?, noi=?, cap_rate=?, year_built=?,
+      occupancy_pct=?, close_date=?, source=?, notes=?, updated_at=CURRENT_TIMESTAMP
+    WHERE id=?
+  `).run(address, city, submarket, property_type, buyer_name, seller_name,
+    size_sf, land_acres, sale_price, price_per_sf, noi, cap_rate, year_built, occupancy_pct,
+    close_date, source, notes, req.params.id);
+  if (result.changes === 0) return res.status(404).json({ error: 'Not found' });
+  res.json(db.prepare('SELECT * FROM sale_comps WHERE id = ?').get(req.params.id));
+});
+
+app.delete('/api/comps/sales/:id', (req, res) => {
+  const result = db.prepare('DELETE FROM sale_comps WHERE id = ?').run(req.params.id);
+  if (result.changes === 0) return res.status(404).json({ error: 'Not found' });
+  res.json({ success: true });
+});
+
+// ─── Deal Documents ────────────────────────────────────────────────────────────
+
+app.get('/api/deals/:id/documents', (req, res) => {
+  const rows = db.prepare('SELECT * FROM deal_documents WHERE deal_id = ? ORDER BY sort_order ASC, id ASC').all(req.params.id);
+  res.json(rows);
+});
+
+app.post('/api/deals/:id/documents', (req, res) => {
+  const { doc_name, status, due_date, notes } = req.body;
+  if (!doc_name) return res.status(400).json({ error: 'Document name is required' });
+  const maxOrder = db.prepare('SELECT MAX(sort_order) as m FROM deal_documents WHERE deal_id = ?').get(req.params.id);
+  const sort_order = (maxOrder.m || 0) + 1;
+  const result = db.prepare(`
+    INSERT INTO deal_documents (deal_id, doc_name, status, due_date, notes, sort_order)
+    VALUES (?, ?, ?, ?, ?, ?)
+  `).run(req.params.id, doc_name, status || 'pending', due_date, notes, sort_order);
+  res.status(201).json(db.prepare('SELECT * FROM deal_documents WHERE id = ?').get(result.lastInsertRowid));
+});
+
+app.put('/api/deals/:id/documents/reorder', (req, res) => {
+  const { items } = req.body;
+  const update = db.prepare('UPDATE deal_documents SET sort_order = ? WHERE id = ? AND deal_id = ?');
+  items.forEach(({ id, sort_order }) => update.run(sort_order, id, req.params.id));
+  res.json({ success: true });
+});
+
+app.put('/api/deals/:id/documents/:docId', (req, res) => {
+  const { status, due_date, completed_date, notes } = req.body;
+  const result = db.prepare(`
+    UPDATE deal_documents SET status=?, due_date=?, completed_date=?, notes=?
+    WHERE id=? AND deal_id=?
+  `).run(status, due_date, completed_date, notes, req.params.docId, req.params.id);
+  if (result.changes === 0) return res.status(404).json({ error: 'Not found' });
+  res.json(db.prepare('SELECT * FROM deal_documents WHERE id = ?').get(req.params.docId));
+});
+
+app.delete('/api/deals/:id/documents/:docId', (req, res) => {
+  const result = db.prepare('DELETE FROM deal_documents WHERE id = ? AND deal_id = ?').run(req.params.docId, req.params.id);
+  if (result.changes === 0) return res.status(404).json({ error: 'Not found' });
+  res.json({ success: true });
+});
+
+// ─── Vendors ──────────────────────────────────────────────────────────────────
+
+app.get('/api/vendors', (req, res) => {
+  const { vendor_type, preferred } = req.query;
+  const conditions = [];
+  const params = [];
+  if (vendor_type) { conditions.push('vendor_type = ?'); params.push(vendor_type); }
+  if (preferred === '1') { conditions.push('preferred = 1'); }
+  let sql = 'SELECT * FROM vendors';
+  if (conditions.length) sql += ' WHERE ' + conditions.join(' AND ');
+  sql += ' ORDER BY preferred DESC, name ASC';
+  res.json(db.prepare(sql).all(...params));
+});
+
+app.get('/api/vendors/:id', (req, res) => {
+  const row = db.prepare('SELECT * FROM vendors WHERE id = ?').get(req.params.id);
+  if (!row) return res.status(404).json({ error: 'Not found' });
+  res.json(row);
+});
+
+app.post('/api/vendors', (req, res) => {
+  const { name, company, vendor_type, specialty, email, phone, address, city, preferred, rating, notes } = req.body;
+  if (!name) return res.status(400).json({ error: 'Name is required' });
+  if (!vendor_type) return res.status(400).json({ error: 'Vendor type is required' });
+  const result = db.prepare(`
+    INSERT INTO vendors (name, company, vendor_type, specialty, email, phone, address, city, preferred, rating, notes)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(name, company, vendor_type, specialty, email, phone, address, city, preferred ? 1 : 0, rating, notes);
+  res.status(201).json(db.prepare('SELECT * FROM vendors WHERE id = ?').get(result.lastInsertRowid));
+});
+
+app.put('/api/vendors/:id', (req, res) => {
+  const { name, company, vendor_type, specialty, email, phone, address, city, preferred, rating, notes } = req.body;
+  const result = db.prepare(`
+    UPDATE vendors SET name=?, company=?, vendor_type=?, specialty=?, email=?, phone=?,
+      address=?, city=?, preferred=?, rating=?, notes=?, updated_at=CURRENT_TIMESTAMP
+    WHERE id=?
+  `).run(name, company, vendor_type, specialty, email, phone, address, city, preferred ? 1 : 0, rating, notes, req.params.id);
+  if (result.changes === 0) return res.status(404).json({ error: 'Not found' });
+  res.json(db.prepare('SELECT * FROM vendors WHERE id = ?').get(req.params.id));
+});
+
+app.delete('/api/vendors/:id', (req, res) => {
+  const result = db.prepare('DELETE FROM vendors WHERE id = ?').run(req.params.id);
+  if (result.changes === 0) return res.status(404).json({ error: 'Not found' });
+  res.json({ success: true });
+});
+
+// ─── Deal Vendors ─────────────────────────────────────────────────────────────
+
+app.get('/api/deals/:id/vendors', (req, res) => {
+  const rows = db.prepare(`
+    SELECT dv.*, v.name, v.company, v.vendor_type, v.specialty, v.phone, v.email, v.preferred
+    FROM deal_vendors dv
+    JOIN vendors v ON dv.vendor_id = v.id
+    WHERE dv.deal_id = ?
+    ORDER BY v.name ASC
+  `).all(req.params.id);
+  res.json(rows);
+});
+
+app.post('/api/deals/:id/vendors', (req, res) => {
+  const { vendor_id, role } = req.body;
+  if (!vendor_id) return res.status(400).json({ error: 'Vendor ID is required' });
+  try {
+    db.prepare('INSERT INTO deal_vendors (deal_id, vendor_id, role) VALUES (?, ?, ?)').run(req.params.id, vendor_id, role);
+    const row = db.prepare(`
+      SELECT dv.*, v.name, v.company, v.vendor_type, v.specialty, v.phone, v.email
+      FROM deal_vendors dv JOIN vendors v ON dv.vendor_id = v.id
+      WHERE dv.deal_id = ? AND dv.vendor_id = ?
+    `).get(req.params.id, vendor_id);
+    res.status(201).json(row);
+  } catch (e) {
+    res.status(409).json({ error: 'Vendor already linked to this deal' });
+  }
+});
+
+app.delete('/api/deals/:id/vendors/:vid', (req, res) => {
+  const result = db.prepare('DELETE FROM deal_vendors WHERE deal_id = ? AND vendor_id = ?').run(req.params.id, req.params.vid);
+  if (result.changes === 0) return res.status(404).json({ error: 'Not found' });
+  res.json({ success: true });
 });
 
 // ─── Fallback SPA ─────────────────────────────────────────────────────────────

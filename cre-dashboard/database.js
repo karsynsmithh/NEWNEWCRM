@@ -1,7 +1,7 @@
 const { DatabaseSync } = require('node:sqlite');
 const path = require('path');
 
-const DB_PATH = path.join(__dirname, 'cre_dashboard.db');
+const DB_PATH = process.env.DB_PATH || path.join(__dirname, 'cre_dashboard.db');
 const _db = new DatabaseSync(DB_PATH);
 
 _db.exec('PRAGMA journal_mode = WAL');
@@ -83,6 +83,164 @@ _db.exec(`
     notes TEXT,
     completed INTEGER DEFAULT 0,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  );
+
+  CREATE TABLE IF NOT EXISTS property_suites (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    property_id INTEGER NOT NULL REFERENCES properties(id) ON DELETE CASCADE,
+    suite_name TEXT NOT NULL,
+    size_sf REAL,
+    asking_rate REAL,
+    asking_price REAL,
+    status TEXT DEFAULT 'available' CHECK(status IN (
+      'available','under_contract','leased','sold','off_market'
+    )),
+    floor TEXT,
+    notes TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  );
+
+  CREATE TABLE IF NOT EXISTS notes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    note_text TEXT NOT NULL,
+    note_date DATETIME DEFAULT CURRENT_TIMESTAMP,
+    property_id INTEGER REFERENCES properties(id) ON DELETE CASCADE,
+    contact_id INTEGER REFERENCES contacts(id) ON DELETE CASCADE,
+    deal_id INTEGER REFERENCES deals(id) ON DELETE CASCADE,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  );
+
+  CREATE TABLE IF NOT EXISTS attachments (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    property_id INTEGER REFERENCES properties(id) ON DELETE CASCADE,
+    deal_id INTEGER REFERENCES deals(id) ON DELETE CASCADE,
+    original_name TEXT NOT NULL,
+    stored_name TEXT NOT NULL,
+    mime_type TEXT,
+    size_bytes INTEGER,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  );
+
+  CREATE TABLE IF NOT EXISTS gmail_tokens (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    access_token TEXT,
+    refresh_token TEXT,
+    expiry_date INTEGER,
+    gmail_email TEXT,
+    last_sync DATETIME,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  );
+
+  CREATE TABLE IF NOT EXISTS email_imports (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    gmail_message_id TEXT UNIQUE NOT NULL,
+    note_id INTEGER REFERENCES notes(id) ON DELETE SET NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  );
+`);
+
+_db.exec(`
+  CREATE TABLE IF NOT EXISTS activities (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    activity_type TEXT NOT NULL CHECK(activity_type IN (
+      'call','email','meeting','site_tour','loi_sent','loi_countered',
+      'lease_sent','lease_executed','voicemail','text','other'
+    )),
+    summary TEXT NOT NULL,
+    notes TEXT,
+    activity_date DATETIME NOT NULL,
+    duration_minutes INTEGER,
+    contact_id INTEGER REFERENCES contacts(id) ON DELETE SET NULL,
+    deal_id INTEGER REFERENCES deals(id) ON DELETE SET NULL,
+    property_id INTEGER REFERENCES properties(id) ON DELETE SET NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  );
+
+  CREATE TABLE IF NOT EXISTS lease_comps (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    address TEXT NOT NULL,
+    city TEXT,
+    submarket TEXT,
+    property_type TEXT CHECK(property_type IN ('retail','office','industrial','land','mixed-use')),
+    tenant_name TEXT,
+    landlord_name TEXT,
+    size_sf REAL,
+    lease_rate REAL,
+    lease_structure TEXT CHECK(lease_structure IN ('NNN','Modified Gross','Full Gross','Other')),
+    term_months INTEGER,
+    ti_allowance REAL,
+    free_rent_months INTEGER,
+    lease_start_date DATE,
+    lease_end_date DATE,
+    date_signed DATE,
+    source TEXT,
+    notes TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  );
+
+  CREATE TABLE IF NOT EXISTS sale_comps (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    address TEXT NOT NULL,
+    city TEXT,
+    submarket TEXT,
+    property_type TEXT CHECK(property_type IN ('retail','office','industrial','land','mixed-use')),
+    buyer_name TEXT,
+    seller_name TEXT,
+    size_sf REAL,
+    land_acres REAL,
+    sale_price REAL,
+    price_per_sf REAL,
+    noi REAL,
+    cap_rate REAL,
+    year_built INTEGER,
+    occupancy_pct REAL,
+    close_date DATE,
+    source TEXT,
+    notes TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  );
+
+  CREATE TABLE IF NOT EXISTS deal_documents (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    deal_id INTEGER NOT NULL REFERENCES deals(id) ON DELETE CASCADE,
+    doc_name TEXT NOT NULL,
+    status TEXT DEFAULT 'pending' CHECK(status IN ('pending','sent','received','executed','n_a')),
+    due_date DATE,
+    completed_date DATE,
+    notes TEXT,
+    sort_order INTEGER DEFAULT 0,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  );
+
+  CREATE TABLE IF NOT EXISTS vendors (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    company TEXT,
+    vendor_type TEXT NOT NULL CHECK(vendor_type IN (
+      'attorney','title_company','lender','inspector','contractor',
+      'appraiser','architect','environmental','accountant','insurance','other'
+    )),
+    specialty TEXT,
+    email TEXT,
+    phone TEXT,
+    address TEXT,
+    city TEXT,
+    preferred INTEGER DEFAULT 0,
+    rating INTEGER CHECK(rating BETWEEN 1 AND 5),
+    notes TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  );
+
+  CREATE TABLE IF NOT EXISTS deal_vendors (
+    deal_id INTEGER REFERENCES deals(id) ON DELETE CASCADE,
+    vendor_id INTEGER REFERENCES vendors(id) ON DELETE CASCADE,
+    role TEXT,
+    PRIMARY KEY (deal_id, vendor_id)
   );
 `);
 

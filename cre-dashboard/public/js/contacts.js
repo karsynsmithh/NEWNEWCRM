@@ -20,6 +20,7 @@ async function loadContacts() {
           <button id="view-kanban" class="${contactsViewMode === 'kanban' ? 'active' : ''}">&#9640; Board</button>
           <button id="view-list" class="${contactsViewMode === 'list' ? 'active' : ''}">&#9776; List</button>
         </div>
+        <a href="/api/contacts/export.csv" class="btn btn-secondary" download>&#8595; Export CSV</a>
         <button class="btn btn-primary" id="add-contact-btn">+ Add Contact</button>
       </div>
     </div>
@@ -54,13 +55,16 @@ function renderKanban(contacts) {
           ${byStage[stage].length === 0
             ? '<p style="font-size:12px;color:var(--text-muted);text-align:center;padding:12px 0">Empty</p>'
             : byStage[stage].map(c => `
-              <div class="kanban-card" onclick="editContact(${c.id})">
-                <div class="kanban-card-name">${c.name}</div>
+              <div class="kanban-card" onclick="openContactProfile(${c.id})">
+                <div class="kanban-card-name">${c.name}${noteCountChip(c.note_count)}</div>
                 <div class="kanban-card-company">${c.company || '—'}</div>
                 <div class="kanban-card-meta">
                   ${c.phone ? `<span>&#128222; ${c.phone}</span>` : ''}
                   ${c.req_property_type ? `<span>&#127968; ${c.req_property_type}</span>` : ''}
                   ${c.next_followup_date ? `<span>&#128197; ${fmtDate(c.next_followup_date)}</span>` : ''}
+                </div>
+                <div class="kanban-card-footer">
+                  <button class="btn btn-sm btn-secondary" onclick="event.stopPropagation();editContact(${c.id})">Edit</button>
                 </div>
               </div>
             `).join('')}
@@ -87,7 +91,7 @@ function renderContactList(contacts) {
               ? `<tr><td colspan="8"><div class="empty-state"><div class="empty-state-icon">&#128101;</div><div class="empty-state-text">No contacts yet.</div></div></td></tr>`
               : contacts.map(c => `
                 <tr>
-                  <td><strong>${c.name}</strong></td>
+                  <td><a href="#" class="teal-link" onclick="openContactProfile(${c.id});return false"><strong>${c.name}</strong></a>${noteCountChip(c.note_count)}</td>
                   <td>${c.company || '—'}</td>
                   <td>${c.contact_type || '—'}</td>
                   <td>${badge(c.pipeline_stage, STATUS_MAP)}</td>
@@ -172,8 +176,68 @@ function contactForm(c = {}) {
   `;
 }
 
+function contactModalBody(c = {}, activeTab = 'details') {
+  const isEdit = !!c.id;
+  const tabsHtml = isEdit ? `
+    <div class="modal-tabs">
+      <button class="modal-tab ${activeTab==='details'?'active':''}" onclick="switchContactTab('details',${c.id})">Details</button>
+      <button class="modal-tab ${activeTab==='activity'?'active':''}" onclick="switchContactTab('activity',${c.id})">Activity History</button>
+    </div>` : '';
+  return tabsHtml + contactForm(c);
+}
+
+window.switchContactTab = async function(tab, contactId) {
+  const body = document.getElementById('modal-body');
+  if (!body) return;
+  const c = await API.get(`/api/contacts/${contactId}`);
+  if (tab === 'details') {
+    body.innerHTML = contactModalBody(c, 'details');
+  } else {
+    body.innerHTML = await buildContactActivityTab(contactId, c);
+  }
+};
+
+async function buildContactActivityTab(contactId, c) {
+  const activities = await API.get(`/api/activities?contact_id=${contactId}`).catch(() => []);
+  const tabsHtml = `
+    <div class="modal-tabs">
+      <button class="modal-tab" onclick="switchContactTab('details',${contactId})">Details</button>
+      <button class="modal-tab active">Activity History</button>
+    </div>`;
+
+  const timelineHtml = activities.length === 0
+    ? '<p style="color:var(--text-muted);font-size:13px;text-align:center;padding:24px 0">No activities logged for this contact.</p>'
+    : `<div class="timeline">${activities.map(a => `
+        <div class="timeline-item">
+          <div class="timeline-dot"></div>
+          <div class="timeline-content">
+            <div class="timeline-meta">${actBadge(a.activity_type)} &nbsp; ${fmtDate(a.activity_date ? a.activity_date.slice(0,10) : '')}</div>
+            <div class="timeline-summary">${a.summary}</div>
+            ${a.notes ? `<div class="timeline-notes">${a.notes}</div>` : ''}
+          </div>
+        </div>`).join('')}
+      </div>`;
+
+  return tabsHtml + `
+    <div style="margin-bottom:12px;display:flex;justify-content:flex-end">
+      <button class="btn btn-secondary btn-sm" onclick="openActivityModalForContact(${contactId})">+ Log Activity</button>
+    </div>
+    ${timelineHtml}`;
+}
+
 function openContactModal(c = {}) {
-  modal.open(c.id ? 'Edit Contact' : 'Add Contact', contactForm(c), async () => {
+  const html = c.id ? `
+    <div class="modal-tabs">
+      <button type="button" class="modal-tab active" data-tab="details">Details</button>
+      <button type="button" class="modal-tab" data-tab="notes">Notes</button>
+      <button type="button" class="modal-tab" data-tab="activity">Activity History</button>
+    </div>
+    <div class="modal-tab-pane" id="tab-details">${contactForm(c)}</div>
+    <div class="modal-tab-pane" id="tab-notes" style="display:none">${notesTabHtml()}</div>
+    <div class="modal-tab-pane" id="tab-activity" style="display:none"><p style="color:var(--text-muted);font-size:13px;padding:12px 0">Loading…</p></div>
+  ` : contactForm(c);
+
+  modal.open(c.id ? 'Edit Contact' : 'Add Contact', html, async () => {
     if (!requireField('name', 'Name is required')) return;
     const data = formData(['name','company','email','phone','contact_type','pipeline_stage',
       'req_size_min','req_size_max','req_budget','req_location','req_property_type',
@@ -192,6 +256,35 @@ function openContactModal(c = {}) {
       toast('Error saving contact', 'error');
     }
   });
+
+  if (c.id) {
+    initModalTabs();
+    loadNotesTab('contact_id', c.id);
+    _loadContactActivityPane(c.id);
+  }
+}
+
+async function _loadContactActivityPane(contactId) {
+  const pane = document.getElementById('tab-activity');
+  if (!pane) return;
+  const activities = await API.get(`/api/activities?contact_id=${contactId}`).catch(() => []);
+  const timelineHtml = activities.length === 0
+    ? '<p style="color:var(--text-muted);font-size:13px;text-align:center;padding:24px 0">No activities logged for this contact.</p>'
+    : `<div class="timeline">${activities.map(a => `
+        <div class="timeline-item">
+          <div class="timeline-dot"></div>
+          <div class="timeline-content">
+            <div class="timeline-meta">${actBadge(a.activity_type)} &nbsp; ${fmtDate(a.activity_date ? a.activity_date.slice(0,10) : '')}</div>
+            <div class="timeline-summary">${a.summary}</div>
+            ${a.notes ? `<div class="timeline-notes">${a.notes}</div>` : ''}
+          </div>
+        </div>`).join('')}
+      </div>`;
+  pane.innerHTML = `
+    <div style="margin-bottom:12px;display:flex;justify-content:flex-end">
+      <button class="btn btn-secondary btn-sm" onclick="openActivityModalForContact(${contactId})">+ Log Activity</button>
+    </div>
+    ${timelineHtml}`;
 }
 
 async function editContact(id) {
@@ -205,3 +298,61 @@ async function deleteContact(id) {
   toast('Contact deleted');
   loadContacts();
 }
+
+window.openContactProfile = async function(id) {
+  const [c, activities] = await Promise.all([
+    API.get(`/api/contacts/${id}`),
+    API.get(`/api/activities?contact_id=${id}`).catch(() => [])
+  ]);
+
+  const recentActs = activities.slice(0, 5);
+  const timelineHtml = recentActs.length === 0
+    ? '<p style="color:var(--text-muted);font-size:13px;text-align:center;padding:12px 0">No recent activities.</p>'
+    : `<div class="timeline">${recentActs.map(a => `
+        <div class="timeline-item">
+          <div class="timeline-dot"></div>
+          <div class="timeline-content">
+            <div class="timeline-meta">${typeof actBadge === 'function' ? actBadge(a.activity_type) : a.activity_type} &nbsp; ${fmtDate(a.activity_date ? a.activity_date.slice(0,10) : '')}</div>
+            <div class="timeline-summary">${escapeHtml(a.summary || '')}</div>
+            ${a.notes ? `<div class="timeline-notes">${escapeHtml(a.notes)}</div>` : ''}
+          </div>
+        </div>`).join('')}
+      </div>`;
+
+  const html = `
+    <div class="profile-header">
+      <div>
+        <div style="font-size:20px;font-weight:700">${escapeHtml(c.name)}</div>
+        ${badge(c.pipeline_stage, STATUS_MAP)}
+      </div>
+    </div>
+    <div class="profile-grid">
+      <div class="profile-field"><span class="profile-label">Company</span>${escapeHtml(c.company || '—')}</div>
+      <div class="profile-field"><span class="profile-label">Type</span>${escapeHtml(c.contact_type || '—')}</div>
+      <div class="profile-field"><span class="profile-label">Email</span>${c.email ? `<a href="mailto:${escapeHtml(c.email)}" class="teal-link">${escapeHtml(c.email)}</a>` : '—'}</div>
+      <div class="profile-field"><span class="profile-label">Phone</span>${c.phone ? `<a href="tel:${escapeHtml(c.phone)}" class="teal-link">${escapeHtml(c.phone)}</a>` : '—'}</div>
+      <div class="profile-field"><span class="profile-label">Next Follow-up</span>${fmtDate(c.next_followup_date)}</div>
+    </div>
+    <div class="profile-section">
+      <div class="profile-section-title">Requirements</div>
+      <div class="profile-grid">
+        <div class="profile-field"><span class="profile-label">Min Size</span>${c.req_size_min ? Number(c.req_size_min).toLocaleString() + ' SF' : '—'}</div>
+        <div class="profile-field"><span class="profile-label">Max Size</span>${c.req_size_max ? Number(c.req_size_max).toLocaleString() + ' SF' : '—'}</div>
+        <div class="profile-field"><span class="profile-label">Max Budget</span>${c.req_budget ? fmt$(c.req_budget) : '—'}</div>
+        <div class="profile-field"><span class="profile-label">Location</span>${escapeHtml(c.req_location || '—')}</div>
+        <div class="profile-field"><span class="profile-label">Property Type</span>${escapeHtml(c.req_property_type || '—')}</div>
+      </div>
+    </div>
+    ${c.notes ? `<div class="profile-section"><div class="profile-section-title">Notes</div><div style="font-size:13px;color:var(--text-muted);white-space:pre-wrap">${escapeHtml(c.notes)}</div></div>` : ''}
+    <div class="profile-section">
+      <div class="profile-section-title">Recent Activities</div>
+      ${timelineHtml}
+    </div>
+    <div style="margin-top:16px">
+      <button class="btn btn-secondary" onclick="modal.close();editContact(${id})">Edit Contact</button>
+    </div>
+  `;
+
+  modal.open('Contact Profile', html, null);
+  document.getElementById('modal-save').style.display = 'none';
+};

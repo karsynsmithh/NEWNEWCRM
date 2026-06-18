@@ -53,6 +53,43 @@ function isOverdue(dateStr) {
   return dateStr && dateStr < today();
 }
 
+// "2026-06-09 14:34:00" or "2026-06-09T14:34" → "Jun 9, 2026 at 2:34 PM"
+function fmtDateTime(dt) {
+  if (!dt) return '—';
+  const d = new Date(String(dt).replace(' ', 'T'));
+  if (isNaN(d)) return dt;
+  const datePart = d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+  const timePart = d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
+  return `${datePart} at ${timePart}`;
+}
+
+// Current local time formatted for <input type="datetime-local">
+function nowLocal() {
+  const d = new Date();
+  d.setMinutes(d.getMinutes() - d.getTimezoneOffset());
+  return d.toISOString().slice(0, 16);
+}
+
+// 💬 count chip shown on list rows (empty string when no notes)
+function noteCountChip(count) {
+  return count > 0 ? `<span class="note-count-chip" title="${count} note${count === 1 ? '' : 's'}">&#128172; ${count}</span>` : '';
+}
+
+// Wire up tab switching inside an open modal body
+function initModalTabs() {
+  document.querySelectorAll('#modal-body .modal-tab').forEach(btn => {
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('#modal-body .modal-tab').forEach(b => b.classList.toggle('active', b === btn));
+      document.querySelectorAll('#modal-body .modal-tab-pane').forEach(pane => {
+        pane.style.display = pane.id === `tab-${btn.dataset.tab}` ? '' : 'none';
+      });
+      // Footer Save applies to the details form only
+      const saveBtn = document.getElementById('modal-save');
+      if (saveBtn) saveBtn.style.display = btn.dataset.tab === 'details' ? '' : 'none';
+    });
+  });
+}
+
 function isToday(dateStr) {
   return dateStr === today();
 }
@@ -72,6 +109,8 @@ function badge(val, map) {
 }
 
 const STATUS_MAP = {
+  available: 'badge-available',
+  off_market: 'badge-off_market',
   active: 'badge-active',
   under_contract: 'badge-under_contract',
   leased: 'badge-leased',
@@ -99,6 +138,7 @@ const modal = {
   open(titleText, html, onSave) {
     this.title.textContent = titleText;
     this.body.innerHTML = html;
+    this.saveBtn.style.display = '';
     this._onSave = onSave;
     this.el.classList.add('open');
     this.backdrop.classList.add('open');
@@ -151,13 +191,14 @@ function requireField(id, msg) {
 
 // ─── Router ────────────────────────────────────────────────────────────────────
 
-const PAGES = ['dashboard', 'properties', 'contacts', 'deals', 'followups'];
+const PAGES = ['dashboard', 'properties', 'contacts', 'deals', 'followups', 'activities', 'comps', 'vendors'];
 const PAGE_LOADERS = {};
 
 function navigate(page) {
   if (!PAGES.includes(page)) page = 'dashboard';
   PAGES.forEach(p => {
-    document.getElementById(`page-${p}`).classList.toggle('active', p === page);
+    const pageEl = document.getElementById(`page-${p}`);
+    if (pageEl) pageEl.classList.toggle('active', p === page);
   });
   document.querySelectorAll('.nav-link').forEach(a => {
     a.classList.toggle('active', a.dataset.page === page);
@@ -200,5 +241,13 @@ document.querySelectorAll('.nav-link').forEach(a => {
 
 // Init
 window.addEventListener('DOMContentLoaded', () => {
+  const params = new URLSearchParams(location.search);
+  if (params.get('gmail') === 'connected') {
+    history.replaceState(null, '', location.pathname + location.hash);
+    setTimeout(() => toast('Gmail connected — click Sync Now to import emails'), 400);
+  } else if (params.get('gmail') === 'error') {
+    history.replaceState(null, '', location.pathname + location.hash);
+    setTimeout(() => toast('Gmail connection failed', 'error'), 400);
+  }
   navigate(location.hash.replace('#', '') || 'dashboard');
 });
